@@ -6,6 +6,7 @@ import time
 import tempfile
 import subprocess
 import shutil
+import datetime
 from google import genai
 from google.genai import types
 
@@ -34,12 +35,26 @@ AVAILABLE_MODELS = {
     "Gemini 2.5 Flash ⚡ (Recommended)": "gemini-2.5-flash",
     "Gemini 2.5 Pro 🧠 (Most capable)":  "gemini-2.5-pro",
 }
+
+COURSES = {
+    "קומבינטוריקה — Combinatorics":          "combinatorics",
+    "מבני נתונים — Data Structures":          "data_structures",
+    'חדו"א — Calculus':                        "calculus",
+    "אלגברה לינארית 2 — Linear Algebra 2":    "linear_algebra_2",
+}
+
 MIME_MAP = {".mp4": "video/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4"}
 LANG_MAP = {
-    "Hebrew (עברית)": ("he", "ההרצאה בעברית. תמלל בעברית בלבד."),
+    "Hebrew (עברית)": ("he", "The lecture is in Hebrew. Transcribe in Hebrew only."),
     "English":         ("en", "The lecture is in English. Transcribe in English only."),
-    "Arabic (عربية)":  ("ar", "المحاضرة بالعربية. فرغها بالعربية فقط."),
+    "Arabic (عربية)":  ("ar", "The lecture is in Arabic. Transcribe in Arabic only."),
 }
+
+# Create course directories on startup
+for _d in COURSES.values():
+    os.makedirs(f"recordings/{_d}", exist_ok=True)
+    os.makedirs(f"summaries/{_d}", exist_ok=True)
+    os.makedirs(f"transcriptions/{_d}", exist_ok=True)
 
 with open("skills/tutor_skill.txt", "r", encoding="utf-8") as f:
     TUTOR_SYSTEM_PROMPT = f.read()
@@ -52,184 +67,263 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── BGU Theme CSS ──────────────────────────────────────────────────────────────
+# ── CSS + KaTeX + RTL ──────────────────────────────────────────────────────────
 st.markdown("""
+<!-- KaTeX for LaTeX rendering -->
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
+      crossorigin="anonymous">
+<script defer
+        src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
+        crossorigin="anonymous"></script>
+<script defer
+        src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+        crossorigin="anonymous"></script>
+<script>
+(function() {
+    var OPTS = {
+        delimiters: [
+            {left: "$$", right: "$$", display: true},
+            {left: "$",  right: "$",  display: false}
+        ],
+        throwOnError: false
+    };
+    function render() {
+        if (window.renderMathInElement) {
+            renderMathInElement(document.body, OPTS);
+        }
+    }
+    // First render after scripts load
+    window.addEventListener("load", function() { setTimeout(render, 200); });
+    // Re-render on every Streamlit rerun (DOM mutations)
+    var observer = new MutationObserver(function() { setTimeout(render, 150); });
+    document.addEventListener("DOMContentLoaded", function() {
+        observer.observe(document.body, {childList: true, subtree: true});
+    });
+})();
+</script>
+
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Syne:wght@700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Syne:wght@700;800&display=swap');
 
-    * { font-family: 'Inter', sans-serif; box-sizing: border-box; }
-    h1, h2, h3, h4 { font-family: 'Syne', sans-serif !important; }
+/* ── Reset & base ── */
+* { box-sizing: border-box; }
+body, * { font-family: 'Inter', sans-serif !important; }
+h1, h2, h3, h4 { font-family: 'Syne', sans-serif !important; }
 
-    /* ── App background (BGU dark navy) ── */
-    .stApp, .main { background: #08111e !important; color: #e2e8f0 !important; }
+/* ── White academic background ── */
+.stApp, .main, [data-testid="stAppViewContainer"] {
+    background: #ffffff !important;
+    color: #0f172a !important;
+}
+[data-testid="stHeader"] { background: #ffffff !important; }
 
-    /* ── Sidebar ── */
-    section[data-testid="stSidebar"] {
-        background: #060e19 !important;
-        border-right: 1px solid #152840 !important;
-    }
-    section[data-testid="stSidebar"] * { color: #cbd5e1 !important; }
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+    background: #f8fafc !important;
+    border-right: 1px solid #e2e8f0 !important;
+}
+section[data-testid="stSidebar"] * { color: #1e293b !important; }
+section[data-testid="stSidebar"] .stSuccess {
+    background: #f0fdf4 !important;
+    border: 1px solid #86efac !important;
+    border-radius: 8px !important;
+    color: #166534 !important;
+    font-size: 0.85rem;
+}
 
-    /* ── Hero header ── */
-    .bgu-header {
-        background: linear-gradient(135deg, #0d1f38 0%, #112845 100%);
-        border: 1px solid #1e3a5f;
-        border-radius: 16px;
-        padding: 2rem 2.5rem 1.8rem;
-        margin-bottom: 1.5rem;
-        position: relative;
-        overflow: hidden;
-    }
-    .bgu-header::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 4px;
-        background: linear-gradient(90deg, #f97316, #fb923c, #f97316);
-    }
-    .bgu-title {
-        font-family: 'Syne', sans-serif !important;
-        font-size: 2.4rem;
-        font-weight: 800;
-        color: #f97316;
-        margin: 0 0 0.3rem 0;
-        line-height: 1.2;
-    }
-    .bgu-subtitle { color: #94a3b8; font-size: 1rem; margin: 0; }
-    .bgu-badge {
-        display: inline-block;
-        background: rgba(249,115,22,0.12);
-        border: 1px solid rgba(249,115,22,0.3);
-        color: #f97316;
-        border-radius: 6px;
-        padding: 0.18rem 0.7rem;
-        font-size: 0.72rem;
-        font-weight: 600;
-        margin-top: 0.8rem;
-        letter-spacing: 0.07em;
-    }
+/* ── Hero header ── */
+.bgu-header {
+    background: #0f172a;
+    border-radius: 14px;
+    padding: 2rem 2.5rem 1.8rem;
+    margin-bottom: 1.5rem;
+    position: relative;
+    overflow: hidden;
+}
+.bgu-header::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, #f97316, #fb923c, #f97316);
+}
+.bgu-title {
+    font-family: 'Syne', sans-serif !important;
+    font-size: 2.2rem; font-weight: 800;
+    color: #f97316; margin: 0 0 0.3rem 0; line-height: 1.2;
+}
+.bgu-subtitle { color: #94a3b8; font-size: 0.95rem; margin: 0; }
+.bgu-badge {
+    display: inline-block;
+    background: rgba(249,115,22,0.15);
+    border: 1px solid rgba(249,115,22,0.4);
+    color: #f97316; border-radius: 6px;
+    padding: 0.18rem 0.7rem; font-size: 0.7rem;
+    font-weight: 700; margin-top: 0.8rem; letter-spacing: 0.08em;
+}
 
-    /* ── Cards ── */
-    .card {
-        background: #0f1f38;
-        border: 1px solid #1a3050;
-        border-radius: 12px;
-        padding: 1.4rem 1.6rem;
-        margin: 0.7rem 0;
-        color: #e2e8f0;
-    }
+/* ── Content cards (white theme) ── */
+.card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 1.4rem 1.6rem;
+    margin: 0.7rem 0;
+    color: #0f172a;
+    direction: rtl;
+    text-align: right;
+}
+/* Code/math inside cards stays LTR */
+.card pre, .card code, .card .katex-display { direction: ltr; text-align: left; }
 
-    /* ── Segment label ── */
-    .seg-label {
-        font-family: 'Syne', sans-serif;
-        font-size: 0.82rem;
-        font-weight: 700;
-        color: #f97316;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        border-bottom: 1px solid #1a3050;
-        padding-bottom: 0.4rem;
-        margin-bottom: 0.8rem;
-    }
+/* ── Segment label ── */
+.seg-label {
+    font-family: 'Syne', sans-serif;
+    font-size: 0.82rem; font-weight: 700;
+    color: #f97316; text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 2px solid #e2e8f0;
+    padding-bottom: 0.4rem; margin-bottom: 0.8rem;
+}
 
-    /* ── Tag styled blocks ── */
-    .tag-definition {
-        background: #091f3a; border-left: 4px solid #3b82f6;
-        border-radius: 4px 10px 10px 4px; padding: 0.65rem 1rem;
-        margin: 0.4rem 0; color: #bfdbfe;
-    }
-    .tag-theorem {
-        background: #082818; border-left: 4px solid #22c55e;
-        border-radius: 4px 10px 10px 4px; padding: 0.65rem 1rem;
-        margin: 0.4rem 0; color: #a7f3d0;
-    }
-    .tag-proof {
-        background: #221600; border-left: 4px solid #f59e0b;
-        border-radius: 4px 10px 10px 4px; padding: 0.65rem 1rem;
-        margin: 0.4rem 0; color: #fde68a;
-    }
+/* ── Tag blocks ── */
+.tag-definition {
+    background: #eff6ff; border-left: 4px solid #3b82f6;
+    border-radius: 4px 10px 10px 4px;
+    padding: 0.65rem 1rem; margin: 0.4rem 0;
+    color: #1e40af; direction: rtl; text-align: right;
+}
+.tag-theorem {
+    background: #f0fdf4; border-left: 4px solid #22c55e;
+    border-radius: 4px 10px 10px 4px;
+    padding: 0.65rem 1rem; margin: 0.4rem 0;
+    color: #166534; direction: rtl; text-align: right;
+}
+.tag-proof {
+    background: #fffbeb; border-left: 4px solid #f59e0b;
+    border-radius: 4px 10px 10px 4px;
+    padding: 0.65rem 1rem; margin: 0.4rem 0;
+    color: #92400e; direction: rtl; text-align: right;
+}
+/* LTR for math inside tags */
+.tag-definition .katex-display,
+.tag-theorem .katex-display,
+.tag-proof .katex-display { direction: ltr; text-align: center; }
 
-    /* ── Buttons ── */
-    .stButton > button {
-        background: linear-gradient(135deg, #f97316, #ea580c) !important;
-        color: white !important; border: none !important;
-        border-radius: 8px !important; padding: 0.55rem 1.6rem !important;
-        font-family: 'Syne', sans-serif !important; font-weight: 700 !important;
-        font-size: 0.95rem !important; transition: opacity 0.2s, transform 0.1s !important;
-    }
-    .stButton > button:hover { opacity: 0.87 !important; transform: translateY(-1px) !important; }
-    .stButton > button:disabled { opacity: 0.35 !important; transform: none !important; background: #374151 !important; }
+/* ── Buttons ── */
+.stButton > button {
+    background: linear-gradient(135deg, #f97316, #ea580c) !important;
+    color: white !important; border: none !important;
+    border-radius: 8px !important; padding: 0.55rem 1.5rem !important;
+    font-family: 'Syne', sans-serif !important; font-weight: 700 !important;
+    font-size: 0.92rem !important;
+}
+.stButton > button:hover { opacity: 0.88 !important; }
+.stButton > button:disabled { background: #cbd5e1 !important; opacity: 1 !important; }
 
-    /* ── Inputs ── */
-    .stTextInput > div > div > input,
-    .stTextArea textarea {
-        background: #08111e !important; border: 1px solid #1e3a5f !important;
-        border-radius: 8px !important; color: #e2e8f0 !important;
-    }
-    .stTextInput > div > div > input:focus,
-    .stTextArea textarea:focus {
-        border-color: #f97316 !important;
-        box-shadow: 0 0 0 2px rgba(249,115,22,0.2) !important;
-    }
-    .stSelectbox > div > div, .stSlider {
-        color: #e2e8f0 !important;
-    }
+/* ── Inputs ── */
+.stTextInput > div > div > input {
+    background: #f8fafc !important; border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important; color: #0f172a !important;
+}
+.stTextInput > div > div > input:focus {
+    border-color: #f97316 !important;
+    box-shadow: 0 0 0 2px rgba(249,115,22,0.15) !important;
+}
+.stTextArea textarea {
+    background: #f8fafc !important; border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important; color: #0f172a !important;
+    direction: rtl; text-align: right;
+    font-size: 0.9rem !important; line-height: 1.7 !important;
+}
 
-    /* ── File uploader ── */
-    .stFileUploader {
-        background: #0f1f38 !important; border: 2px dashed #1e3a5f !important;
-        border-radius: 12px !important;
-    }
+/* ── Selectbox ── */
+.stSelectbox > div > div {
+    background: #f8fafc !important; border: 1px solid #cbd5e1 !important;
+    border-radius: 8px !important; color: #0f172a !important;
+}
 
-    /* ── Expander ── */
-    div[data-testid="stExpander"] {
-        background: #0f1f38 !important; border: 1px solid #1a3050 !important;
-        border-radius: 10px !important;
-    }
+/* ── File uploader ── */
+.stFileUploader {
+    background: #f8fafc !important; border: 2px dashed #cbd5e1 !important;
+    border-radius: 12px !important;
+}
 
-    /* ── Progress bar ── */
-    .stProgress > div > div > div {
-        background: linear-gradient(90deg, #f97316, #fb923c) !important;
-        border-radius: 4px !important;
-    }
+/* ── Expander ── */
+div[data-testid="stExpander"] {
+    background: #f8fafc !important; border: 1px solid #e2e8f0 !important;
+    border-radius: 10px !important;
+}
 
-    /* ── Tabs ── */
-    .stTabs [data-baseweb="tab-list"] {
-        background: #060e19 !important; border-radius: 10px;
-        padding: 0.25rem; gap: 0.25rem;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background: transparent !important; color: #94a3b8 !important;
-        border-radius: 7px !important; font-family: 'Syne', sans-serif !important;
-        font-weight: 700 !important; font-size: 0.9rem !important;
-    }
-    .stTabs [aria-selected="true"] {
-        background: #f97316 !important; color: white !important;
-    }
+/* ── Progress bar ── */
+.stProgress > div > div > div {
+    background: linear-gradient(90deg, #f97316, #fb923c) !important;
+    border-radius: 4px !important;
+}
 
-    /* ── Chat bubbles ── */
-    .chat-user {
-        background: #1a3050; border: 1px solid #2563eb;
-        border-radius: 14px 14px 4px 14px; padding: 0.75rem 1.1rem;
-        margin: 0.5rem 0 0.5rem auto; max-width: 78%;
-        color: #bfdbfe; text-align: right;
-    }
-    .chat-ai {
-        background: #0f1f38; border: 1px solid #1a3050;
-        border-radius: 14px 14px 14px 4px; padding: 0.75rem 1.1rem;
-        margin: 0.5rem auto 0.5rem 0; max-width: 78%; color: #e2e8f0;
-    }
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    background: #f1f5f9 !important; border-radius: 10px; padding: 0.25rem; gap: 0.25rem;
+}
+.stTabs [data-baseweb="tab"] {
+    background: transparent !important; color: #64748b !important;
+    border-radius: 7px !important; font-family: 'Syne', sans-serif !important;
+    font-weight: 700 !important; font-size: 0.88rem !important;
+}
+.stTabs [aria-selected="true"] {
+    background: #f97316 !important; color: white !important;
+}
 
-    /* ── Metrics ── */
-    div[data-testid="metric-container"] {
-        background: #0f1f38 !important; border: 1px solid #1a3050 !important;
-        border-radius: 10px !important; padding: 0.9rem 1rem !important;
-    }
-    div[data-testid="metric-container"] label { color: #94a3b8 !important; font-size: 0.8rem !important; }
-    div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #f97316 !important; font-family: 'Syne', sans-serif !important; }
+/* ── Chat bubbles (RTL) ── */
+.chat-user {
+    background: #eff6ff; border: 1px solid #bfdbfe;
+    border-radius: 14px 14px 4px 14px;
+    padding: 0.75rem 1.1rem; margin: 0.5rem 0 0.5rem auto;
+    max-width: 78%; color: #1e40af;
+    direction: rtl; text-align: right;
+}
+.chat-ai {
+    background: #f8fafc; border: 1px solid #e2e8f0;
+    border-radius: 14px 14px 14px 4px;
+    padding: 0.75rem 1.1rem; margin: 0.5rem auto 0.5rem 0;
+    max-width: 78%; color: #0f172a;
+    direction: rtl; text-align: right;
+}
+/* LTR for math in chat */
+.chat-ai .katex-display, .chat-user .katex-display { direction: ltr; text-align: center; }
 
-    /* ── Alerts ── */
-    div[data-baseweb="notification"] { border-radius: 8px !important; }
+/* ── Metrics ── */
+div[data-testid="metric-container"] {
+    background: #f8fafc !important; border: 1px solid #e2e8f0 !important;
+    border-radius: 10px !important;
+}
+div[data-testid="metric-container"] label { color: #64748b !important; font-size: 0.78rem !important; }
+div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
+    color: #f97316 !important; font-family: 'Syne', sans-serif !important;
+}
+
+/* ── Course badge ── */
+.course-badge {
+    display: inline-block;
+    background: #0f172a; color: white;
+    border-radius: 8px; padding: 0.25rem 0.85rem;
+    font-size: 0.82rem; font-weight: 600;
+    font-family: 'Syne', sans-serif;
+    margin-bottom: 0.5rem;
+}
+
+/* ── Save path info ── */
+.save-info {
+    background: #f0fdf4; border: 1px solid #86efac;
+    border-radius: 8px; padding: 0.7rem 1rem;
+    color: #166534; font-size: 0.85rem;
+    direction: ltr; text-align: left;
+    margin-top: 0.5rem;
+}
+
+/* ── Divider ── */
+hr { border-color: #e2e8f0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -246,6 +340,9 @@ _defaults = {
     "ready":            False,
     "video_path":       None,
     "video_start_time": 0,
+    "saved_summary_path":     None,
+    "saved_transcript_path":  None,
+    "current_course":   None,
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
@@ -255,43 +352,43 @@ for k, v in _defaults.items():
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
 
-    api_key_input = st.text_input(
-        "🔑 Gemini API Key",
-        type="password",
-        placeholder="Auto-loaded from .env ✓" if _env_key else "Paste your API key...",
-        value=st.session_state.api_key,
-    )
-    if api_key_input:
-        st.session_state.api_key = api_key_input
+    # API key — hidden if already loaded from .env
     if _env_key:
-        st.success("Key loaded from .env ✓")
+        st.success("🔑 API Key loaded from .env")
+    else:
+        api_key_input = st.text_input(
+            "🔑 Gemini API Key",
+            type="password",
+            placeholder="Paste your Gemini API key...",
+            value=st.session_state.api_key,
+        )
+        if api_key_input:
+            st.session_state.api_key = api_key_input
 
     st.markdown("---")
 
-    model_label = st.selectbox("🤖 Model", list(AVAILABLE_MODELS.keys()), index=0)
+    model_label    = st.selectbox("🤖 Model", list(AVAILABLE_MODELS.keys()), index=0)
     selected_model = AVAILABLE_MODELS[model_label]
 
-    lang_label = st.selectbox("🌐 Lecture Language", list(LANG_MAP.keys()), index=0)
+    lang_label      = st.selectbox("🌐 Lecture Language", list(LANG_MAP.keys()), index=0)
     lang_code, lang_hint = LANG_MAP[lang_label]
 
-    chunk_minutes = st.slider("✂️ Segment Length (minutes)", min_value=5, max_value=20, value=12, step=1)
+    chunk_minutes = st.slider("✂️ Segment Length (min)", min_value=5, max_value=20, value=12, step=1)
 
     auto_delete = st.checkbox("🗑️ Delete local video after processing", value=True)
 
     st.markdown("---")
     st.markdown("### 📋 How to use")
     st.markdown("""
-1. Paste your Gemini API key (or set in `.env`)
-2. Upload a file **or** pick from `recordings/`
-3. Click **Process Lecture**
-4. Browse results in the tabs
-5. Chat with the AI tutor below!
+1. Select a **course** from the dropdown
+2. Upload a file or pick from `recordings/`
+3. Click **Process** or **Quick Test**
+4. Browse tabs: Summary · Segments · Transcript
+5. Chat with the AI tutor!
     """)
     st.markdown("---")
     st.markdown(
-        '<div style="color:#475569;font-size:0.78rem;line-height:1.5;">'
-        'BGU Lecture Summarizer<br>Powered by Google Gemini'
-        '</div>',
+        '<div style="color:#94a3b8;font-size:0.78rem;">BGU Lecture Summarizer · Powered by Gemini</div>',
         unsafe_allow_html=True,
     )
 
@@ -300,11 +397,15 @@ st.markdown("""
 <div class="bgu-header">
     <div class="bgu-title">🎓 BGU Lecture Summarizer</div>
     <div class="bgu-subtitle">
-        Upload a lecture recording → Gemini segments, transcribes &amp; summarizes → Interactive AI tutor
+        Upload a lecture → AI segments, transcribes &amp; summarizes → Interactive tutor with LaTeX rendering
     </div>
     <div class="bgu-badge">POWERED BY GEMINI</div>
 </div>
 """, unsafe_allow_html=True)
+
+# ── Course selector ────────────────────────────────────────────────────────────
+course_label    = st.selectbox("📚 Course", list(COURSES.keys()), index=0)
+course_dir_name = COURSES[course_label]
 
 # ── File selection ─────────────────────────────────────────────────────────────
 col_up, col_rec = st.columns([1, 1])
@@ -314,22 +415,25 @@ with col_up:
         type=["mp4", "mp3", "wav", "m4a"],
     )
 with col_rec:
-    os.makedirs("recordings", exist_ok=True)
+    course_rec_dir = os.path.join("recordings", course_dir_name)
     rec_files = sorted(
-        f for f in os.listdir("recordings")
+        f for f in os.listdir(course_rec_dir)
         if f.lower().endswith((".mp4", ".mp3", ".wav", ".m4a"))
     )
     if rec_files:
-        selected_file = st.selectbox("📂 Or pick from recordings/", ["-- Select --"] + rec_files)
+        selected_file = st.selectbox(
+            f"📂 Or pick from recordings/{course_dir_name}/",
+            ["-- Select --"] + rec_files,
+        )
     else:
         selected_file = None
-        st.info("No files found in recordings/")
+        st.info(f"No files in recordings/{course_dir_name}/")
 
 use_local = bool(selected_file and selected_file != "-- Select --")
 has_file  = bool(uploaded_file or use_local)
 has_key   = bool(st.session_state.api_key)
 
-# ── Metrics row (shown after processing) ──────────────────────────────────────
+# ── Metrics row ────────────────────────────────────────────────────────────────
 if st.session_state.chunk_summaries:
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -338,22 +442,19 @@ if st.session_state.chunk_summaries:
         words = len((st.session_state.transcription or "").split())
         st.metric("Words", f"{words:,}")
     with m3:
-        st.metric("Model", selected_model.split("-")[-1].upper())
+        st.metric("Course", course_dir_name.replace("_", " ").title()[:14])
     with m4:
-        st.metric("Language", lang_label.split("(")[0].strip())
+        st.metric("Model", selected_model.split("-")[-1].upper())
 
 # ── Action buttons ─────────────────────────────────────────────────────────────
 btn_col, test_col, reset_col, _ = st.columns([1, 1, 1, 3])
 with btn_col:
-    process_btn = st.button(
-        "✨ Process Lecture",
-        disabled=(not has_file or not has_key),
-    )
+    process_btn = st.button("✨ Process Lecture", disabled=(not has_file or not has_key))
 with test_col:
     test_btn = st.button(
         "🧪 Quick Test",
         disabled=(not has_file or not has_key),
-        help="Transcribe & summarize only the first segment so you can test Gemini Q&A quickly.",
+        help="Process only the first segment for a quick preview.",
     )
 with reset_col:
     if st.session_state.ready:
@@ -368,16 +469,13 @@ def get_mime(filename: str) -> str:
 
 
 def split_video(input_path: str, output_dir: str, chunk_sec: int) -> list:
-    """Split video into fixed-length segments. Falls back to [input_path] on error."""
     ext     = os.path.splitext(input_path)[1]
     pattern = os.path.join(output_dir, f"seg_%03d{ext}")
     try:
         result = subprocess.run(
-            [
-                "ffmpeg", "-i", input_path, "-c", "copy", "-map", "0",
-                "-segment_time", str(chunk_sec), "-f", "segment",
-                "-reset_timestamps", "1", pattern,
-            ],
+            ["ffmpeg", "-i", input_path, "-c", "copy", "-map", "0",
+             "-segment_time", str(chunk_sec), "-f", "segment",
+             "-reset_timestamps", "1", pattern],
             capture_output=True, text=True, timeout=600,
         )
         if result.returncode == 0:
@@ -390,18 +488,18 @@ def split_video(input_path: str, output_dir: str, chunk_sec: int) -> list:
                 return chunks
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-    return [input_path]  # fallback: treat whole file as one segment
+    return [input_path]
 
 
 def transcribe_segment(
     client, file_path: str, file_name: str, mime_type: str,
     lang_hint: str, model: str,
 ) -> str:
-    """Upload → poll ACTIVE → transcribe → delete. Returns transcript text."""
     prompt = (
         f"{lang_hint} "
         "Transcribe this lecture segment completely and accurately. "
-        "Include all spoken words, technical terms, and formulas. "
+        "Include all spoken content and technical terms. "
+        "Wrap ALL mathematical expressions in LaTeX: inline with $...$ and display with $$...$$. "
         "Mark whiteboard content with [BOARD: ...]."
     )
     gf = client.files.upload(
@@ -416,9 +514,9 @@ def transcribe_segment(
         if poll > 75:
             try: client.files.delete(name=gf.name)
             except Exception: pass
-            raise TimeoutError(f"Timeout waiting for Gemini to process: {file_name}")
+            raise TimeoutError(f"Timeout: {file_name}")
     if gf.state.name != "ACTIVE":
-        raise RuntimeError(f"File processing failed (state={gf.state.name}): {file_name}")
+        raise RuntimeError(f"File failed (state={gf.state.name}): {file_name}")
     resp = client.models.generate_content(
         model=model,
         contents=[types.Content(role="user", parts=[
@@ -434,13 +532,12 @@ def transcribe_segment(
 def summarize_segment(
     client, transcript: str, seg_num: int, total: int, model: str,
 ) -> str:
-    """Concise per-segment summary — keeps prompt short to save tokens."""
-    # Cap transcript to ~6 000 chars; Gemini will still capture key content
     excerpt = transcript[:6000]
     prompt  = (
         f"Lecture segment {seg_num}/{total}. "
         "Summarize concisely in Hebrew. "
-        "Structure: key concepts → main points → formulas/code/algorithms. "
+        "ALL mathematical expressions MUST be in LaTeX: inline $...$ or display $$...$$. "
+        "Structure: key concepts → main points → formulas/algorithms. "
         "Use [DEFINITION: ...] [THEOREM: ...] [PROOF: ...] tags where relevant.\n\n"
         f"Transcript:\n{excerpt}"
     )
@@ -453,17 +550,14 @@ def summarize_segment(
 
 
 def generate_master_summary(client, chunk_summaries: list, model: str) -> str:
-    """Aggregate all segment summaries into one cohesive master summary."""
     joined = "\n\n---\n\n".join(
         f"Segment {e['idx'] + 1}:\n{e['summary']}" for e in chunk_summaries
     )
     prompt = (
-        "You have summaries of every segment of an academic lecture. "
-        "Write a unified master summary in Hebrew that:\n"
-        "• Covers all topics in logical order\n"
-        "• Lists all key definitions, theorems, and algorithms\n"
-        "• Highlights exam-critical points\n"
-        "• Uses [DEFINITION: ...] [THEOREM: ...] [PROOF: ...] tags\n\n"
+        "Create a unified master summary in Hebrew from these lecture segment summaries. "
+        "ALL mathematical expressions MUST use LaTeX: inline $...$ or display $$...$$. "
+        "Include: all topics in order, key definitions/theorems/algorithms, exam-critical points. "
+        "Use [DEFINITION: ...] [THEOREM: ...] [PROOF: ...] tags.\n\n"
         f"Segment summaries:\n{joined}"
     )
     resp = client.models.generate_content(
@@ -472,6 +566,19 @@ def generate_master_summary(client, chunk_summaries: list, model: str) -> str:
         config=types.GenerateContentConfig(system_instruction=TUTOR_SYSTEM_PROMPT),
     )
     return resp.text
+
+
+def save_outputs(course_dir: str, base_name: str, master: str, transcript: str) -> tuple:
+    """Save summary and transcript to course folders. Returns (summary_path, transcript_path)."""
+    ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = re.sub(r'[^\w\-.]', '_', os.path.splitext(base_name)[0])[:40]
+    s_path = os.path.join("summaries",      course_dir, f"{ts}_{name}.txt")
+    t_path = os.path.join("transcriptions", course_dir, f"{ts}_{name}.txt")
+    with open(s_path, "w", encoding="utf-8") as f:
+        f.write(master)
+    with open(t_path, "w", encoding="utf-8") as f:
+        f.write(transcript)
+    return s_path, t_path
 
 
 def parse_timestamps(text: str) -> list:
@@ -486,8 +593,7 @@ def parse_timestamps(text: str) -> list:
             if m.group(3)
             else int(m.group(1)) * 60 + int(m.group(2))
         )
-        ctx = text[max(0, m.start() - 40): min(len(text), m.end() + 50)].replace("\n", " ").strip()
-        results.append({"label": lbl, "seconds": secs, "context": ctx})
+        results.append({"label": lbl, "seconds": secs})
     return results
 
 
@@ -503,13 +609,15 @@ def render_math_str(latex_str: str) -> str:
 
 
 def render_summary_html(text: str) -> str:
+    """Convert [DEFINITION/THEOREM/PROOF] tags to styled HTML divs.
+    LaTeX ($...$) is left intact for KaTeX auto-render in the browser."""
     TAG_CLASS = {"DEFINITION": "tag-definition", "THEOREM": "tag-theorem", "PROOF": "tag-proof"}
     TAG_LABEL = {"DEFINITION": "📘 הגדרה", "THEOREM": "📗 משפט", "PROOF": "📙 הוכחה"}
 
     def make_div(tag: str, content: str) -> str:
         css = TAG_CLASS.get(tag, "card")
         lbl = TAG_LABEL.get(tag, f"[{tag}]")
-        return f'<div class="{css}"><strong>{lbl}:</strong> {content.strip()}</div>'
+        return f'<div class="{css}" dir="rtl"><strong>{lbl}:</strong> {content.strip()}</div>'
 
     text = re.sub(
         r'\[(DEFINITION|THEOREM|PROOF)\](.*?)\[/\1\]',
@@ -549,7 +657,7 @@ def generate_pdf_bytes(chunk_summaries: list, master_summary: str) -> bytes | No
 
         def header(self):
             self.set_font(self.main_font, "B", 16)
-            self.set_text_color(249, 115, 22)   # BGU orange
+            self.set_text_color(249, 115, 22)
             self.cell(0, 10, "BGU Lecture Summary", ln=True, align="C")
             self.set_draw_color(249, 115, 22)
             self.set_line_width(0.4)
@@ -564,63 +672,48 @@ def generate_pdf_bytes(chunk_summaries: list, master_summary: str) -> bytes | No
 
         def write_section(self, text: str):
             TAG_INFO = {
-                "DEFINITION": ((59, 130, 246),  "DEFINITION"),
-                "THEOREM":    ((34, 197, 94),   "THEOREM"),
-                "PROOF":      ((245, 158, 11),  "PROOF"),
+                "DEFINITION": ((59, 130, 246), "DEFINITION"),
+                "THEOREM":    ((34, 197, 94),  "THEOREM"),
+                "PROOF":      ((245, 158, 11), "PROOF"),
             }
-            pos = 0
-            pat = re.compile(
+            pos, pat = 0, re.compile(
                 r'\[(DEFINITION|THEOREM|PROOF)(?::\s*(.*?))?\](.*?)(?:\[/\1\]|(?=\[(DEFINITION|THEOREM|PROOF)|\Z))',
                 re.DOTALL | re.IGNORECASE,
             )
             for m in pat.finditer(text):
                 before = text[pos:m.start()].strip()
-                if before:
-                    self._write_plain(before)
+                if before: self._write_plain(before)
                 tag   = m.group(1).upper()
                 body  = ((m.group(2) or "") + " " + (m.group(3) or "")).strip()
-                color, lbl = TAG_INFO.get(tag, ((150, 150, 150), tag))
+                color, lbl = TAG_INFO.get(tag, ((100, 100, 100), tag))
                 self.set_font(self.main_font, "B", 9)
                 self.set_text_color(*color)
                 self.cell(0, 6, f"[{lbl}]", ln=True)
-                self.set_text_color(220, 220, 230)
+                self.set_text_color(30, 30, 30)
                 self.set_font(self.main_font, "", 9)
-                if body:
-                    self._write_plain(body)
+                if body: self._write_plain(body)
                 self.ln(2)
                 pos = m.end()
             rest = text[pos:].strip()
-            if rest:
-                self._write_plain(rest)
+            if rest: self._write_plain(rest)
 
         def _write_plain(self, text: str):
             self.set_font(self.main_font, "", 9)
-            self.set_text_color(220, 220, 230)
-            text = re.sub(
-                r'\$\$(.*?)\$\$',
-                lambda m: "\n" + render_math_str(m.group(1)) + "\n",
-                text, flags=re.DOTALL,
-            )
-            text = re.sub(
-                r'\$((?:[^$\\]|\\.)+)\$',
-                lambda m: render_math_str(m.group(1)),
-                text,
-            )
+            self.set_text_color(30, 30, 30)
+            text = re.sub(r'\$\$(.*?)\$\$', lambda m: "\n" + render_math_str(m.group(1)) + "\n",
+                          text, flags=re.DOTALL)
+            text = re.sub(r'\$((?:[^$\\]|\\.)+)\$', lambda m: render_math_str(m.group(1)), text)
             self.multi_cell(0, 5, text)
 
     try:
         pdf = LecturePDF()
         pdf.set_auto_page_break(auto=True, margin=20)
-
-        # Master summary page
         pdf.add_page()
         pdf.set_font(pdf.main_font, "B", 13)
         pdf.set_text_color(249, 115, 22)
         pdf.cell(0, 9, "Master Summary", ln=True)
         pdf.ln(3)
         pdf.write_section(master_summary)
-
-        # Per-segment pages
         for entry in chunk_summaries:
             pdf.add_page()
             pdf.set_font(pdf.main_font, "B", 12)
@@ -628,7 +721,6 @@ def generate_pdf_bytes(chunk_summaries: list, master_summary: str) -> bytes | No
             pdf.cell(0, 9, f"Segment {entry['idx'] + 1}", ln=True)
             pdf.ln(3)
             pdf.write_section(entry["summary"])
-
         return bytes(pdf.output())
     except Exception:
         return None
@@ -637,6 +729,42 @@ def generate_pdf_bytes(chunk_summaries: list, master_summary: str) -> bytes | No
 @st.cache_data(show_spinner=False)
 def _cached_pdf(summaries_json: str, master: str) -> bytes | None:
     return generate_pdf_bytes(json.loads(summaries_json), master)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SHARED PROCESSING LOGIC
+# ════════════════════════════════════════════════════════════════════════════════
+def _resolve_file():
+    """Returns (file_path, file_name, local_to_delete, tmp_path)."""
+    if use_local:
+        fp = os.path.join("recordings", course_dir_name, selected_file)
+        return fp, selected_file, (fp if auto_delete else None), None
+    else:
+        suffix = os.path.splitext(uploaded_file.name)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.read())
+            tmp_path = tmp.name
+        return tmp_path, uploaded_file.name, None, tmp_path
+
+
+def _finalize(chunk_summaries, full_transcript, master, file_name, course_dir, video_src):
+    """Store results in session state, save to disk, seed chat."""
+    s_path, t_path = save_outputs(course_dir, file_name, master, full_transcript.strip())
+
+    st.session_state.chat_history_raw = [
+        {"role": "user",  "text": f"סיכום מאסטר של ההרצאה:\n{master}"},
+        {"role": "model", "text": "קראתי את סיכום ההרצאה. אני מוכן ללמד אותך נושא אחד בכל פעם!"},
+    ]
+    st.session_state.chat_display           = []
+    st.session_state.transcription          = full_transcript.strip()
+    st.session_state.master_summary         = master
+    st.session_state.chunk_summaries        = chunk_summaries
+    st.session_state.ready                  = True
+    st.session_state.current_course         = course_label
+    st.session_state.saved_summary_path     = s_path
+    st.session_state.saved_transcript_path  = t_path
+    st.session_state.video_path             = video_src
+    st.session_state.video_start_time       = 0
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -652,70 +780,45 @@ if test_btn and has_file and has_key:
     status       = st.empty()
 
     try:
-        # Resolve file
-        if use_local:
-            file_path = os.path.join("recordings", selected_file)
-            file_name = selected_file
-        else:
-            status.info("💾 Saving uploaded file…")
-            suffix = os.path.splitext(uploaded_file.name)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-            file_path, file_name = tmp_path, uploaded_file.name
-
+        file_path, file_name, local_to_delete, tmp_path = _resolve_file()
         mime_type = get_mime(file_name)
 
-        # Split and take only first segment
         progress_bar.progress(0.1, text="✂️ Extracting first segment…")
         status.info(f"✂️ Extracting first ~{chunk_minutes}-minute segment…")
-        chunk_dir = tempfile.mkdtemp(prefix="bgu_test_")
-        chunks    = split_video(file_path, chunk_dir, chunk_sec)
-        first_seg = chunks[0]
-
+        chunk_dir  = tempfile.mkdtemp(prefix="bgu_test_")
+        chunks     = split_video(file_path, chunk_dir, chunk_sec)
+        first_seg  = chunks[0]
         base, ext  = os.path.splitext(file_name)
         chunk_name = f"{base}_test_seg001{ext}"
 
-        progress_bar.progress(0.25, text="🎙️ Transcribing segment 1…")
+        progress_bar.progress(0.25, text="🎙️ Transcribing…")
         status.info("🎙️ Transcribing first segment…")
-        transcript = transcribe_segment(
-            client, first_seg, chunk_name, mime_type, lang_hint, selected_model,
-        )
+        transcript = transcribe_segment(client, first_seg, chunk_name, mime_type, lang_hint, selected_model)
 
-        progress_bar.progress(0.75, text="🤖 Summarizing…")
+        progress_bar.progress(0.70, text="🤖 Summarizing…")
         status.info("🤖 Summarizing segment…")
         summary = summarize_segment(client, transcript, 1, len(chunks), selected_model)
 
-        # Cleanup
         if chunk_dir and os.path.exists(chunk_dir):
-            shutil.rmtree(chunk_dir, ignore_errors=True)
-            chunk_dir = None
+            shutil.rmtree(chunk_dir, ignore_errors=True); chunk_dir = None
         if tmp_path and os.path.exists(tmp_path):
             try: os.unlink(tmp_path)
             except Exception: pass
 
-        # Seed chat with this single segment (token-efficient)
-        st.session_state.chat_history_raw = [
-            {"role": "user",  "text": f"סיכום של קטע בדיקה מההרצאה:\n{summary}"},
-            {"role": "model", "text": "קראתי את הקטע. אני מוכן לענות על שאלות!"},
-        ]
-        st.session_state.chat_display    = []
-        st.session_state.transcription   = f"--- Segment 1 (Quick Test) ---\n\n{transcript}"
-        st.session_state.master_summary  = summary
-        st.session_state.chunk_summaries = [{"idx": 0, "transcript": transcript, "summary": summary}]
-        st.session_state.video_path      = None
-        st.session_state.ready           = True
+        video_src = None if (use_local and auto_delete) else file_path
+        _finalize(
+            [{"idx": 0, "transcript": transcript, "summary": summary}],
+            f"--- Segment 1 (Quick Test) ---\n\n{transcript}",
+            summary, file_name, course_dir_name, video_src,
+        )
 
-        n_total = len(chunks)
         progress_bar.progress(1.0, text="✅ Quick Test ready!")
         status.success(
-            f"✅ First segment processed! "
-            f"(Full lecture has ~{n_total} segment(s) total.) "
-            "Scroll down to chat with the tutor."
+            f"✅ First segment processed! Full lecture has ~{len(chunks)} segment(s). "
+            "Scroll down to explore."
         )
         time.sleep(1.5)
-        progress_bar.empty()
-        status.empty()
+        progress_bar.empty(); status.empty()
         st.rerun()
 
     except Exception as e:
@@ -724,13 +827,12 @@ if test_btn and has_file and has_key:
             except Exception: pass
         if chunk_dir and os.path.exists(chunk_dir):
             shutil.rmtree(chunk_dir, ignore_errors=True)
-        progress_bar.empty()
-        status.empty()
+        progress_bar.empty(); status.empty()
         st.error(f"❌ Quick Test error: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# PROCESSING
+# FULL PROCESSING
 # ════════════════════════════════════════════════════════════════════════════════
 if process_btn and has_file and has_key:
     client    = genai.Client(api_key=st.session_state.api_key)
@@ -742,37 +844,20 @@ if process_btn and has_file and has_key:
     status       = st.empty()
 
     try:
-        # ── Resolve file path ─────────────────────────────────────────────
-        if use_local:
-            file_path = os.path.join("recordings", selected_file)
-            file_name = selected_file
-            local_to_delete = file_path if auto_delete else None
-        else:
-            status.info("💾 Saving uploaded file…")
-            suffix = os.path.splitext(uploaded_file.name)[1]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-            file_path, file_name = tmp_path, uploaded_file.name
-            local_to_delete = None
-
+        file_path, file_name, local_to_delete, tmp_path = _resolve_file()
         mime_type = get_mime(file_name)
 
-        # Keep temp file for video player (unless auto-delete local)
-        st.session_state.video_path = (
-            None if (use_local and auto_delete) else file_path
-        )
+        video_src = None if (use_local and auto_delete) else file_path
+        st.session_state.video_path = video_src
         st.session_state.video_start_time = 0
 
-        # ── Split into segments ───────────────────────────────────────────
         progress_bar.progress(0.04, text="✂️ Splitting into segments…")
-        status.info(f"✂️ Splitting lecture into ~{chunk_minutes}-minute segments…")
+        status.info(f"✂️ Splitting into ~{chunk_minutes}-minute segments…")
         chunk_dir = tempfile.mkdtemp(prefix="bgu_segs_")
         chunks    = split_video(file_path, chunk_dir, chunk_sec)
         n         = len(chunks)
         status.info(f"📊 {n} segment(s) detected — starting analysis…")
 
-        # ── Process each segment ──────────────────────────────────────────
         chunk_summaries = []
         full_transcript = ""
 
@@ -781,54 +866,34 @@ if process_btn and has_file and has_key:
             base, ext  = os.path.splitext(file_name)
             chunk_name = f"{base}_seg{i + 1:03d}{ext}"
 
-            # Transcribe
-            prog = 0.08 + (i / n) * 0.72
-            progress_bar.progress(prog, text=f"🎙️ Transcribing {seg_label}…")
+            progress_bar.progress(0.08 + (i / n) * 0.72, text=f"🎙️ Transcribing {seg_label}…")
             status.info(f"🎙️ Transcribing {seg_label}…")
-            transcript = transcribe_segment(
-                client, chunk_path, chunk_name, mime_type, lang_hint, selected_model,
-            )
+            transcript = transcribe_segment(client, chunk_path, chunk_name, mime_type, lang_hint, selected_model)
 
-            # Summarize
-            prog2 = 0.08 + (i / n) * 0.72 + (0.72 / n) * 0.5
-            progress_bar.progress(prog2, text=f"🤖 Summarizing {seg_label}…")
+            progress_bar.progress(0.08 + (i / n) * 0.72 + (0.72 / n) * 0.5, text=f"🤖 Summarizing {seg_label}…")
             status.info(f"🤖 Summarizing {seg_label}…")
             summary = summarize_segment(client, transcript, i + 1, n, selected_model)
 
             chunk_summaries.append({"idx": i, "transcript": transcript, "summary": summary})
             full_transcript += f"\n\n--- {seg_label} ---\n\n{transcript}"
 
-        # ── Master summary ────────────────────────────────────────────────
-        progress_bar.progress(0.85, text="🧠 Generating master summary…")
-        status.info("🧠 Aggregating all segments into a master summary…")
+        progress_bar.progress(0.86, text="🧠 Generating master summary…")
+        status.info("🧠 Aggregating all segments into master summary…")
         master = generate_master_summary(client, chunk_summaries, selected_model)
 
-        # ── Cleanup ───────────────────────────────────────────────────────
         if local_to_delete and os.path.exists(local_to_delete):
-            os.remove(local_to_delete)
-            st.session_state.video_path = None
+            os.remove(local_to_delete); video_src = None
         if chunk_dir and os.path.exists(chunk_dir):
-            shutil.rmtree(chunk_dir, ignore_errors=True)
-            chunk_dir = None
+            shutil.rmtree(chunk_dir, ignore_errors=True); chunk_dir = None
 
-        # ── Seed chat with master summary (token-efficient) ───────────────
-        st.session_state.chat_history_raw = [
-            {"role": "user",  "text": f"סיכום מאסטר של ההרצאה:\n{master}"},
-            {"role": "model", "text": "קראתי את סיכום ההרצאה המלא. אני מוכן ללמד אותך נושא אחד בכל פעם!"},
-        ]
-        st.session_state.chat_display    = []
-        st.session_state.transcription   = full_transcript.strip()
-        st.session_state.master_summary  = master
-        st.session_state.chunk_summaries = chunk_summaries
-        st.session_state.ready           = True
+        _finalize(chunk_summaries, full_transcript, master, file_name, course_dir_name, video_src)
 
         progress_bar.progress(1.0, text="✅ Done!")
-        status.success(f"✅ Processed {n} segment(s) successfully! Scroll down to explore the results.")
+        status.success(f"✅ {n} segment(s) processed and saved to {course_dir_name}/")
         if auto_delete and use_local:
             st.toast("🗑️ Local video deleted")
         time.sleep(1.5)
-        progress_bar.empty()
-        status.empty()
+        progress_bar.empty(); status.empty()
         st.rerun()
 
     except Exception as e:
@@ -837,8 +902,7 @@ if process_btn and has_file and has_key:
             except Exception: pass
         if chunk_dir and os.path.exists(chunk_dir):
             shutil.rmtree(chunk_dir, ignore_errors=True)
-        progress_bar.empty()
-        status.empty()
+        progress_bar.empty(); status.empty()
         st.error(f"❌ Error: {e}")
 
 
@@ -848,9 +912,24 @@ if process_btn and has_file and has_key:
 if st.session_state.chunk_summaries:
     st.markdown("---")
 
-    has_video  = bool(
-        st.session_state.video_path and os.path.exists(st.session_state.video_path)
-    )
+    # Course badge
+    if st.session_state.current_course:
+        st.markdown(
+            f'<div class="course-badge">📚 {st.session_state.current_course}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Saved paths info
+    if st.session_state.saved_summary_path:
+        st.markdown(
+            f'<div class="save-info">'
+            f'💾 Summary → <code>{st.session_state.saved_summary_path}</code><br>'
+            f'💾 Transcript → <code>{st.session_state.saved_transcript_path}</code>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    has_video  = bool(st.session_state.video_path and os.path.exists(st.session_state.video_path))
     timestamps = parse_timestamps(st.session_state.transcription or "")
 
     if has_video:
@@ -884,17 +963,17 @@ if st.session_state.chunk_summaries:
         with tab_master:
             if st.session_state.master_summary:
                 rendered = render_summary_html(st.session_state.master_summary)
-                st.markdown(f'<div class="card">{rendered}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="card" dir="rtl">{rendered}</div>', unsafe_allow_html=True)
 
         with tab_segs:
+            total = len(st.session_state.chunk_summaries)
             for entry in st.session_state.chunk_summaries:
-                total = len(st.session_state.chunk_summaries)
                 st.markdown(
                     f'<div class="seg-label">📦 Segment {entry["idx"] + 1} / {total}</div>',
                     unsafe_allow_html=True,
                 )
                 rendered = render_summary_html(entry["summary"])
-                st.markdown(f'<div class="card">{rendered}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="card" dir="rtl">{rendered}</div>', unsafe_allow_html=True)
 
         with tab_trans:
             st.text_area(
@@ -915,17 +994,15 @@ if st.session_state.chunk_summaries:
                 for e in st.session_state.chunk_summaries
             )
         )
-        n_cols = 3 if FPDF_AVAILABLE else 2
+        n_cols  = 3 if FPDF_AVAILABLE else 2
         dl_cols = st.columns(n_cols)
-
         with dl_cols[0]:
             st.download_button("⬇️ Summary (.txt)", full_export, "summary.txt", "text/plain")
         with dl_cols[1]:
             st.download_button(
                 "⬇️ Transcription (.txt)",
                 st.session_state.transcription or "",
-                "transcription.txt",
-                "text/plain",
+                "transcription.txt", "text/plain",
             )
         if FPDF_AVAILABLE:
             with dl_cols[2]:
@@ -950,7 +1027,8 @@ if st.session_state.ready:
         if msg["role"] == "user":
             st.markdown(f'<div class="chat-user">🙋 {msg["content"]}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f'<div class="chat-ai">🤖 {msg["content"]}</div>', unsafe_allow_html=True)
+            rendered_ans = render_summary_html(msg["content"])
+            st.markdown(f'<div class="chat-ai">🤖 {rendered_ans}</div>', unsafe_allow_html=True)
 
     question = st.text_input(
         "Ask the tutor…",
