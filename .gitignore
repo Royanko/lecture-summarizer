@@ -1,0 +1,21 @@
+# API keys & secrets
+.env
+
+# Large media files
+recordings/
+
+# IDE configuration
+.idea/
+*.iml
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+
+# App output folders
+transcriptions/
+summaries/
