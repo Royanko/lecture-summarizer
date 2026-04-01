@@ -10,12 +10,20 @@ import datetime
 from google import genai
 from google.genai import types
 
-# ── Optional dependencies ──────────────────────────────────────────────────────
+# ── Load .env (explicit path so it works regardless of CWD) ───────────────────
+import pathlib
+_env_file = pathlib.Path(__file__).parent / ".env"
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(dotenv_path=_env_file, override=True)
 except ImportError:
-    pass
+    # Fallback: parse .env manually if python-dotenv isn't installed
+    if _env_file.exists():
+        for _line in _env_file.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 
 try:
     from fpdf import FPDF
