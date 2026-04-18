@@ -19,3 +19,16 @@ __pycache__/
 # App output folders
 transcriptions/
 summaries/
+backend/.env
+_legacy_streamlit_backup/
+frontend/.env.local
+
+# Node dependencies
+node_modules/
+frontend/node_modules/
+
+# Next.js build output
+frontend/.next/
+
+# Claude Code local settings
+.claude/settings.local.json

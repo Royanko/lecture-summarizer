@@ -1,34 +1,138 @@
-# Lecture Summarizer — Project Guide
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Overview
-A Streamlit web app that takes lecture recordings (MP4/MP3/WAV/M4A), transcribes them via the Gemini Files API, produces structured summaries, and provides an interactive tutoring chat grounded in the transcript.
+A web app that takes lecture recordings (MP4/MP3/WAV/M4A) or plain-text transcripts, transcribes them via the Gemini Files API, produces structured RTL Hebrew summaries per chunk with styled semantic cards, and provides an interactive tutoring chat grounded in the transcript. Each course also maintains an auto-updating **Knowledge Base** — a deduplicated, topic-organised exam study guide.
+
+**Architecture**: Next.js 15 frontend + FastAPI backend (two separate processes).
 
 ## Stack
+
+### Backend (`backend/`)
 - **Python 3.14** with a `.venv` virtualenv
-- **Streamlit** — UI framework
-- **`google-genai`** — Gemini API client (`from google import genai`). This is the NEW package. Do NOT use `google-generativeai` (deprecated).
-- **`fpdf2`** — optional PDF export
-- **`sympy`** — optional LaTeX → unicode rendering for PDFs
-- **`python-dotenv`** — loads `GOOGLE_API_KEY` from `.env`
+- **FastAPI** + **uvicorn** — REST API server on `http://localhost:8000`
+- **`google-genai`** — Gemini API client (`from google import genai`). NEW package. Do NOT use `google-generativeai` (deprecated).
+- **`python-dotenv`** — loads `GOOGLE_API_KEY` from `.env` (root or `backend/`)
 - **ffmpeg** (system binary) — splits files >500 MB into 20-min chunks
-- **Model**: `gemini-2.5-flash` (constant `MODEL` at top of `app.py`)
+- **Models**: `gemini-2.5-flash` (default), `gemini-2.5-pro` (selectable)
+
+### Frontend (`frontend/`)
+- **Next.js 15** (React 18, TypeScript)
+- **Tailwind CSS**
+- **`react-markdown`** + **`remark-math`** + **`rehype-katex`** — Markdown + LaTeX rendering
+- **`mermaid`** — SVG diagram rendering for ` ```mermaid ` blocks
+- **`remark-gfm`** — GitHub Flavored Markdown (tables, strikethrough)
+- **`rehype-raw`** — raw HTML passthrough
+- Dev server: `http://localhost:3000`
 
 ## File Structure
 ```
-app.py                  # Main Streamlit app (all logic lives here)
-skills/tutor_skill.txt  # System prompt for the Gemini tutor (Hebrew). DO NOT MODIFY.
-requirements.txt        # streamlit, google-genai, python-dotenv, fpdf2, sympy
-recordings/             # Drop large lecture files here (MP4/MP3/WAV/M4A)
-.env                    # GOOGLE_API_KEY=... (not committed)
+backend/
+  main.py               # FastAPI app — all processing logic + KB pipeline
+  build_kb.py           # One-shot script: rebuild KB from an existing master summary
+  requirements.txt
+  .env                  # GOOGLE_API_KEY=... (not committed)
+frontend/
+  app/
+    page.tsx            # Dashboard — course cards, upload, KB banner
+    summary/page.tsx    # Summary + tutor chat page
+    knowledge-base/[course]/page.tsx  # Knowledge Base viewer page
+  components/
+    SummaryRenderer.tsx # Shared RTL renderer: semantic cards, LaTeX, Mermaid
+    Sidebar.tsx
+    CourseCard.tsx
+  lib/
+    api.ts              # API client helpers
+    AppContext.tsx       # Global state (course, result, chat history)
+skills/
+  summary_skill.txt     # System prompt for per-segment summarisation (Hebrew)
+  tutor_chat_skill.txt  # System prompt for AI tutor chat. DO NOT MODIFY.
+  kb_builder_skill.txt  # System prompt for KB merge/refinement LLM call
+recordings/             # Drop large lecture files here
+summaries/
+  <course>/
+    *.txt               # Saved master summaries (timestamped)
+    knowledge_base.md   # Auto-updated course knowledge base
+transcriptions/         # Saved transcription files
+start_app.bat           # Launches both servers (Windows)
+_legacy_streamlit_backup/  # Old Streamlit app — ignore completely
 ```
 
-## Processing Flow (`app.py`)
-1. **File input**: browser upload (≤200 MB) OR pick from `recordings/` folder
-2. **Large file (>500 MB)**: ffmpeg splits into 20-min chunks; user clicks "Summarize Next Part" per chunk
-3. **Transcription** (`transcribe_file`): upload via `client.files.upload()` → poll until `state.name == "ACTIVE"` → `generate_content` with the file URI + prompt → delete file from Gemini
-4. **Summarization** (`summarize_chunk`): `generate_content` with transcript text + `system_instruction=system_prompt`
-5. **Chat seeding**: transcript is injected as first user message in `chat_history_raw`
-6. **Chat**: on every message, rebuild `client.chats.create(...)` from `chat_history_raw` (plain dicts) to avoid stale object issues across Streamlit reruns
+## Backend API Endpoints (`backend/main.py`)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check |
+| GET | `/models` | List available Gemini models |
+| POST | `/upload` | Start a video/audio processing job; returns `{job_id, ...}` |
+| POST | `/upload-transcript` | Fast-track: start job from `.txt` transcript, skips transcription |
+| GET | `/jobs/{job_id}` | Poll job status + progressive chunk results |
+| POST | `/chat` | Send a chat message; returns assistant reply |
+| GET | `/knowledge-base/{course_id}` | Return `{course_id, course_label, content}` for KB viewer |
+
+### Job flow
+1. `POST /upload` or `POST /upload-transcript` → creates background job, returns `job_id`
+2. Client polls `GET /jobs/{job_id}` until `status == "done"` or `"error"`
+3. On `"done"`, response includes `chunks` (list of `{idx, transcript, summary}`), `summary` (master), `transcript` (full)
+4. After saving outputs, the KB pipeline runs automatically
+
+## Processing Flow (`backend/main.py`)
+1. **Receive file** via `/upload`; save to temp dir
+2. **Large file (>500 MB)**: `split_video()` uses ffmpeg to cut into 20-min chunks
+3. **Per chunk** — `transcribe_segment()`:
+   - `client.files.upload()` → poll until `state.name == "ACTIVE"` → `generate_content` with file URI → `client.files.delete()`
+4. **Per chunk** — `summarize_segment()`: `generate_content` with transcript + `summary_skill.txt`
+5. **Master summary** — `generate_master_summary()`: combines all chunk summaries
+6. **Save outputs** — `save_outputs()`: writes to `summaries/<course>/` and `transcriptions/`
+7. **Knowledge Base** — `update_knowledge_base()`: 5-step pipeline (see below)
+8. **Chat** — `/chat` endpoint rebuilds `client.chats.create(...)` from `history` plain dicts on every request
+
+## Knowledge Base Pipeline (`backend/main.py`)
+Triggered automatically at the end of every job. Source: master summary only.
+
+1. **Extract** — `_extract_blocks(master)`: regex-parses all `[DEFINITION]`, `[THEOREM]`, `[CLAIM]`, `[PROOF]`, `[EXERCISE]`, `[NOTE]` blocks
+2. **Load existing** — `_kb_load_existing(kb_path)`: parses `knowledge_base.md` via `<!--kb:{uuid}-->` anchors into a flat item list
+3. **Unified LLM build** — `_kb_build_with_llm()`: single call using `kb_builder_skill.txt` as `system_instruction`; sends new blocks + existing items; receives merged complete item list as JSON
+4. **Render** — `_kb_render()`: rebuilds full file with auto-generated TOC, sorted by `main_topic → sub_topic → tag_type order → title`; each item anchored with `<!--kb:{uuid}-->`
+5. **Fallback** — `_kb_simple_append()`: if LLM call fails, raw blocks are appended chronologically
+
+KB file location: `summaries/<course>/knowledge_base.md`
+
+## Semantic Card System
+The summary renderer parses special tag markers in the LLM output and wraps them in styled cards.
+
+| Tag | Card color | Label |
+|-----|-----------|-------|
+| `[DEFINITION]` | Blue | הגדרה |
+| `[THEOREM]` | Amber/Yellow | משפט |
+| `[CLAIM]` | Teal | טענה |
+| `[PROOF]` | Green | הוכחה |
+| `[EXERCISE]` | Red | תרגיל |
+| `[NOTE]` | Purple | הערה |
+
+**Format in LLM output:**
+```
+#### 🔵 הגדרה: Concept Name
+[DEFINITION]
+body text…
+```
+
+The heading line is optional but recommended. The parser uses a regex that captures the heading line + tag as a single unit to avoid "bleeding header" bugs.
+
+## Mermaid Diagrams
+- Detected via ` ```mermaid ` code blocks in markdown
+- Rendered client-side as SVG via the `mermaid` npm package (lazy-initialised)
+- `MermaidDiagram` component in `SummaryRenderer.tsx`: async render, removes hardcoded SVG height for responsiveness, shows raw code fallback on parse error
+- `summary_skill.txt` explicitly forbids ASCII art and instructs the LLM to use Mermaid for all visual diagrams (trees, graphs, flowcharts)
+
+## Shared Components (`frontend/components/`)
+
+### `SummaryRenderer.tsx`
+The single source of truth for rendering summary markdown. Used on both the summary page and the knowledge base viewer.
+- `parseSegments(text)` — splits text into plain segments and typed card segments
+- `TAG_CONFIG` — maps tag types to CSS class, emoji, label
+- `MermaidDiagram` — renders ` ```mermaid ` blocks as SVG
+- `summaryComponents` — ReactMarkdown custom components (RTL tables, mermaid intercept)
 
 ## Key google.genai API Patterns
 ```python
@@ -53,11 +157,11 @@ r = client.models.generate_content(model=MODEL, contents=[
     ])
 ])
 
-# Generate text only
+# Generate text only (with system instruction)
 r = client.models.generate_content(model=MODEL, contents="text",
     config=types.GenerateContentConfig(system_instruction="..."))
 
-# Chat (rebuild from history each time)
+# Chat (rebuild from history on every request — no persistent chat object)
 chat = client.chats.create(
     model=MODEL,
     config=types.GenerateContentConfig(system_instruction="..."),
@@ -66,56 +170,85 @@ chat = client.chats.create(
 response = chat.send_message("question")
 ```
 
-## Session State Keys
-| Key | Type | Description |
-|-----|------|-------------|
-| `transcription` | str\|None | Full accumulated transcript text |
-| `summary` | str\|None | Latest chunk summary |
-| `chunk_summaries` | list | `[{idx, transcript, summary}]` per chunk |
-| `chunks_remaining` | list | File paths of unprocessed chunks |
-| `chunk_dir_path` | str\|None | Temp dir holding chunk files (cleaned up when done) |
-| `current_chunk_idx` | int | Index of last processed chunk |
-| `total_chunks_count` | int | Total number of chunks |
-| `processing_mime` | str\|None | MIME type for chunked processing |
-| `processing_fname` | str\|None | Original filename for chunked processing |
-| `chat_display` | list | `[{role, content}]` for UI rendering |
-| `chat_history_raw` | list | `[{role, text}]` plain dicts for rebuilding chat |
-| `api_key` | str | Gemini API key |
-| `ready` | bool | True after first successful processing |
-| `video_path` | str\|None | Local path to video for `st.video` player |
-| `video_start_time` | int | Seek position in seconds for video player |
+## Frontend State (`frontend/lib/AppContext.tsx`)
+Global state stored in `sessionStorage` (survives page navigation within the session):
+- `selectedCourse` — course key (`combinatorics`, `data_structures`, `calculus`, `linear_algebra_2`)
+- `result` — `{ chunks: [{idx, transcript, summary}], summary, transcript, totalSegments }`
+- `activeJob` — `{ jobId, status, progress, totalSegments }` — used to resume polling on refresh
+- `settings` — `{ model, lang, apiKey, chunkMinutes }`
+- Chat history — local component state on the summary page, seeded from `chat_seed`
 
-## UI Features
-- **Dark theme**: `#0a0a0f` background, purple-blue gradient accents, Syne + Inter fonts
-- **Sidebar**: API key input (auto-loaded from `.env`), lecture language selector (Hebrew/English/Arabic), auto-delete local video checkbox
-- **Summary display**: `[DEFINITION]`, `[THEOREM]`, `[PROOF]` tags rendered as styled HTML cards
-- **Timestamp extraction**: `[MM:SS]` / `[HH:MM:SS]` in transcript → clickable jump buttons for video player
-- **Download**: summary `.txt`, transcription `.txt`, optional PDF export
-- **Chat**: text input + "Send" button; "יאללה נמשיך" triggers next topic in tutor flow
+## UI Pages & Features
 
-## Tutor Skill (`skills/tutor_skill.txt`)
-Hebrew-language system prompt. The tutor:
-- Corrects STT errors in the transcript before teaching
-- Presents one sub-topic at a time, waits for student confirmation
-- Uses fixed structure per topic: concepts → explanation → code/math → exam tip
-- Uses LaTeX for math, Markdown for formatting
-- Ends with a 5–10 question multiple-choice quiz
-- **DO NOT MODIFY this file** — it is the core pedagogical logic
+### Dashboard (`app/page.tsx`)
+- Course selector cards (4 courses)
+- Drag-and-drop / click-to-upload for video/audio
+- Test Mode button (trims to first 10 minutes via ffmpeg)
+- Fast Track: upload `.txt` transcript directly
+- **Knowledge Base banner** — prominent link to `/knowledge-base/{course}` for the selected course
 
-## Running the App
+### Summary Page (`app/summary/page.tsx`)
+- Segment navigator with dot strip (jump to any segment)
+- Toggle between segment summary and transcript view
+- **Master Summary** button: toggles a full-page view of the master summary above the segment navigator
+- Download buttons for master summary, all summaries, transcript
+- AI Tutor chat panel (right side, 35% width)
+- Live "processing" state with progressive segment loading
+
+### Knowledge Base Viewer (`app/knowledge-base/[course]/page.tsx`)
+- Fetches `knowledge_base.md` from `GET /api/knowledge-base/{course}`
+- Renders using `SummaryRenderer` — same semantic card UI as summary page
+- Download `.md` button
+- Empty state with call-to-action when no KB exists yet
+
+## Skills Files
+| File | Purpose | Editable? |
+|------|---------|-----------|
+| `summary_skill.txt` | Per-segment summarisation prompt. Defines semantic tag format, forbids ASCII art, instructs Mermaid usage | Yes |
+| `tutor_chat_skill.txt` | AI tutor chat system prompt (Hebrew). Pedagogical logic. | **NO** |
+| `kb_builder_skill.txt` | KB merge/refinement prompt. Instructs academic editing style, no full proofs, Mermaid/table visuals | Yes |
+
+## Common Commands
+
+### Run the app
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Start both servers (Windows one-click)
+start_app.bat
 
-# Set API key
-echo GOOGLE_API_KEY=your_key_here > .env
+# Manual — backend (port 8000)
+cd backend
+../.venv/Scripts/uvicorn main:app --reload --port 8000
 
-# Run
-streamlit run app.py
+# Manual — frontend (port 3000)
+cd frontend
+npm run dev
 ```
+
+### Frontend
+```bash
+cd frontend
+npm run build      # production build
+npm run start      # serve the production build
+npm run lint       # next lint
+```
+
+### Backend utilities
+```bash
+# Rebuild knowledge_base.md from an existing master summary (no new lecture needed).
+# Edit COURSE_DIR / SUMMARY_FILE at the top of backend/build_kb.py first.
+cd backend
+../.venv/Scripts/python build_kb.py
+```
+
+There is no automated test suite in this repo — verify changes by running the app end-to-end.
+
+### Interactive API docs
+FastAPI serves Swagger UI at http://localhost:8000/docs once the backend is running.
 
 ## Important Constraints
 - Do not switch to `google-generativeai` — use `google-genai` only
-- Chat must be rebuilt from `chat_history_raw` on every Streamlit rerun (not stored as an object in session state)
-- `skills/tutor_skill.txt` must not be modified
+- Chat must be rebuilt from history plain dicts on every `/chat` request (no persistent chat object)
+- `skills/tutor_chat_skill.txt` (or `tutor_skill.txt`) must not be modified
 - The `.env` file is not committed to git
+- `_legacy_streamlit_backup/` is the old Streamlit app — do not touch it
+- All uploads >10 MB go directly to FastAPI (not through Next.js proxy) — see `next.config.mjs` rewrites
