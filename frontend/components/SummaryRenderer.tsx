@@ -240,8 +240,18 @@ function parseSegments(text: string): Segment[] {
 
 // Wrapped in memo so typing in the chat input (which triggers SummaryPageInner
 // re-render) does NOT re-render the heavy summary view when `text` hasn't changed.
-const SummaryRenderer = memo(function SummaryRenderer({ text }: { text: string }) {
+const SummaryRenderer = memo(function SummaryRenderer({
+  text,
+  showCardNumbers = false,
+}: {
+  text: string;
+  showCardNumbers?: boolean;
+}) {
   const segments = parseSegments(text);
+
+  // Separate counter for semantic cards only (text segments are not counted).
+  // Must be a plain variable — map() is synchronous so sequential mutation is safe.
+  let cardCounter = 0;
 
   return (
     <div className="summary-prose">
@@ -251,7 +261,7 @@ const SummaryRenderer = memo(function SummaryRenderer({ text }: { text: string }
             <ReactMarkdown
               key={i}
               remarkPlugins={[remarkMath, remarkGfm]}
-              rehypePlugins={[rehypeRaw, rehypeKatex]}
+              rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false, errorColor: "inherit" }], rehypeRaw]}
               components={summaryComponents}
             >
               {seg.content}
@@ -259,26 +269,62 @@ const SummaryRenderer = memo(function SummaryRenderer({ text }: { text: string }
           );
         }
 
+        cardCounter++;
+        const cardNum = cardCounter;
+
         const cfg = TAG_CONFIG[seg.type];
         const headerText = seg.title
           ? `${cfg.emoji} ${cfg.label}: ${seg.title}`
           : `${cfg.emoji} ${cfg.label}`;
 
         return (
-          <div key={i} className={`semantic-card semantic-card--${cfg.cls}`}>
-            <div className="semantic-card__header">
-              <ReactMarkdown
-                remarkPlugins={[remarkMath, remarkGfm]}
-                rehypePlugins={[rehypeKatex]}
-                components={{ p: ({ children }) => <>{children}</> }}
-              >
-                {headerText}
-              </ReactMarkdown>
+          <div
+            key={i}
+            className={`semantic-card semantic-card--${cfg.cls}`}
+            {...(showCardNumbers ? { "data-card-idx": cardNum } : {})}
+          >
+            {/* Header — flex row so the card-number badge sits on the
+                physical-left end while the title flows RTL on the right */}
+            <div
+              className="semantic-card__header"
+              style={{ display: "flex", alignItems: "center" }}
+            >
+              <div style={{ flex: 1 }}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkMath, remarkGfm]}
+                  rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+                  components={{ p: ({ children }) => <>{children}</> }}
+                >
+                  {headerText}
+                </ReactMarkdown>
+              </div>
+
+              {showCardNumbers && (
+                <span
+                  dir="ltr"
+                  style={{
+                    flexShrink: 0,
+                    marginRight: "0.6rem",   // gap from title in RTL flow
+                    fontSize: "0.7rem",
+                    fontFamily: "Inter, system-ui, sans-serif",
+                    fontWeight: 500,
+                    opacity: 0.5,
+                    background: "rgba(0,0,0,0.07)",
+                    borderRadius: "0.35rem",
+                    padding: "0.15rem 0.45rem",
+                    letterSpacing: "0.02em",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  כרטיס {cardNum}
+                </span>
+              )}
             </div>
+
             <div className="semantic-card__body">
               <ReactMarkdown
                 remarkPlugins={[remarkMath, remarkGfm]}
-                rehypePlugins={[rehypeKatex]}
+                rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
                 components={summaryComponents}
               >
                 {seg.content}

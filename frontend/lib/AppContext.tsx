@@ -29,7 +29,6 @@ export interface AppSettings {
   model:        ModelKey;
   lang:         LangKey;
   chunkMinutes: number;
-  apiKey:       string;
 }
 
 export interface ChunkEntry {
@@ -98,7 +97,6 @@ const DEFAULT_STATE: AppState = {
     model:        "gemini-2.5-flash",
     lang:         "he",
     chunkMinutes: 12,
-    apiKey:       "",
   },
   result:         null,
   selectedCourse: "combinatorics",

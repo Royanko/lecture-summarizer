@@ -49,7 +49,6 @@ export interface UploadParams {
   chunkMinutes: number;
   testMode: boolean;
   courseDir: string;
-  apiKey?: string;
 }
 
 export interface ChatParams {
@@ -57,7 +56,6 @@ export interface ChatParams {
   summaryContext: string;
   chatHistory: { role: "user" | "model"; text: string }[];
   model: string;
-  apiKey?: string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -93,7 +91,6 @@ export async function startUploadJob(params: UploadParams): Promise<Job> {
   form.append("chunk_minutes", String(params.chunkMinutes));
   form.append("test_mode", String(params.testMode));
   form.append("course_dir", params.courseDir);
-  if (params.apiKey) form.append("api_key", params.apiKey);
 
   // directUrl — NOT proxyUrl — so the request never touches Next.js
   const res = await fetch(directUrl("/upload"), { method: "POST", body: form });
@@ -111,7 +108,6 @@ export interface TranscriptUploadParams {
   model:     string;
   lang:      string;
   courseDir: string;
-  apiKey?:   string;
 }
 
 /**
@@ -125,7 +121,6 @@ export async function startTranscriptUploadJob(params: TranscriptUploadParams): 
   form.append("model", params.model);
   form.append("lang", params.lang);
   form.append("course_dir", params.courseDir);
-  if (params.apiKey) form.append("api_key", params.apiKey);
 
   const res = await fetch(directUrl("/upload-transcript"), { method: "POST", body: form });
   if (!res.ok) {
@@ -208,6 +203,16 @@ export async function fetchResumableJobs(courseId: string): Promise<ResumableJob
   }
 }
 
+export async function terminateResumableJob(courseId: string, wipName: string): Promise<void> {
+  const res = await fetch(proxyUrl(`/resumable-jobs/${courseId}/${wipName}`), {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail ?? "Terminate failed");
+  }
+}
+
 /**
  * Re-upload the original video file to POST /resume.
  * The backend re-splits it with ffmpeg but loads already-checkpointed
@@ -220,7 +225,6 @@ export async function startResumeJob(params: Omit<UploadParams, "testMode">): Pr
   form.append("lang", params.lang);
   form.append("chunk_minutes", String(params.chunkMinutes));
   form.append("course_dir", params.courseDir);
-  if (params.apiKey) form.append("api_key", params.apiKey);
 
   const res = await fetch(directUrl("/resume"), { method: "POST", body: form });
   if (!res.ok) {
@@ -321,7 +325,6 @@ export async function sendChatMessage(params: ChatParams): Promise<string> {
       summary_context: params.summaryContext,
       chat_history: params.chatHistory,
       model: params.model,
-      api_key: params.apiKey ?? "",
     }),
   });
 

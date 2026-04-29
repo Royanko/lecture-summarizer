@@ -103,23 +103,6 @@ export default function Sidebar() {
           </p>
         </div>
 
-        {/* API Key override */}
-        <div className="flex flex-col gap-2">
-          <label className="text-xs font-semibold text-slate-300 uppercase tracking-wider">
-            API Key Override
-          </label>
-          <input
-            type="password"
-            placeholder="Loaded from .env by default"
-            value={settings.apiKey}
-            onChange={(e) =>
-              update({ type: "SET_SETTINGS", payload: { apiKey: e.target.value } })
-            }
-            className="w-full bg-bgu-blue-dark text-white border border-bgu-blue-light rounded-lg
-                       px-3 py-2 text-sm placeholder-slate-500
-                       focus:outline-none focus:ring-2 focus:ring-bgu-orange"
-          />
-        </div>
       </div>
 
       {/* Footer */}

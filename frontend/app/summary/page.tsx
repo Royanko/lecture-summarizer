@@ -335,6 +335,40 @@ function SummaryPageInner() {
   // ── Master summary toggle ──────────────────────────────────────────────────
   const [showMasterSummary, setShowMasterSummary] = useState(false);
 
+  // ── Master summary card counter (IntersectionObserver) ─────────────────────
+  const masterScrollRef  = useRef<HTMLDivElement>(null);
+  const [activeCardIdx, setActiveCardIdx] = useState(1);
+  const [totalCards,    setTotalCards]    = useState(0);
+
+  useEffect(() => {
+    if (!showMasterSummary || !masterScrollRef.current) {
+      setTotalCards(0);
+      return;
+    }
+    const root  = masterScrollRef.current;
+    const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-card-idx]"));
+    setTotalCards(cards.length);
+    if (cards.length === 0) return;
+    setActiveCardIdx(1);
+
+    // Track the set of cards that currently have any pixel inside the scroll
+    // container.  The topmost one (minimum index) is the "active" card.
+    const visible = new Set<number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const idx = parseInt(entry.target.getAttribute("data-card-idx") ?? "0", 10);
+          if (entry.isIntersecting) visible.add(idx);
+          else visible.delete(idx);
+        });
+        if (visible.size > 0) setActiveCardIdx(Math.min(...visible));
+      },
+      { root, threshold: 0 },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [showMasterSummary]);
+
   // ── Chat state ─────────────────────────────────────────────────────────────
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
@@ -408,7 +442,6 @@ function SummaryPageInner() {
         summaryContext: chatSummaryContext,
         chatHistory:    newHistory.map((h) => ({ role: h.role, text: h.text })),
         model:          state.settings.model,
-        apiKey:         state.settings.apiKey || undefined,
       });
       setChatHistory((prev) => [...prev, { role: "model", text: reply }]);
     } catch (err: unknown) {
@@ -536,8 +569,8 @@ function SummaryPageInner() {
         {/* Content area — master summary / transcript / segment summary */}
         {showMasterSummary ? (
           /* ── Master Summary panel ── */
-          <div className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
-            <SummaryRenderer text={result.summary} />
+          <div ref={masterScrollRef} className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
+            <SummaryRenderer text={result.summary} showCardNumbers />
           </div>
         ) : showTranscript ? (
           /* ── Transcript panel ── */
@@ -583,6 +616,23 @@ function SummaryPageInner() {
           </div>
         )}
       </section>
+
+      {/* ── Fixed card counter — only visible in master summary view ── */}
+      {showMasterSummary && totalCards > 0 && (
+        <div
+          className="fixed bottom-6 left-6 z-50 pointer-events-none
+                     flex items-center gap-1.5
+                     bg-slate-900/85 backdrop-blur-sm
+                     text-white rounded-xl px-4 py-2
+                     shadow-lg"
+          dir="ltr"
+        >
+          <span className="text-slate-400 text-xs font-medium">כרטיס</span>
+          <span className="text-bgu-orange font-bold text-sm tabular-nums">{activeCardIdx}</span>
+          <span className="text-slate-500 text-xs">מתוך</span>
+          <span className="text-white font-semibold text-sm tabular-nums">{totalCards}</span>
+        </div>
+      )}
 
       {/* ══ RIGHT PANE — AI Tutor Chat (35%) ════════════════════════════════ */}
       <section className="w-[35%] h-full flex flex-col bg-white">

@@ -15,6 +15,7 @@ import json as _json
 import os
 import pathlib
 import platform
+import random
 import re
 import shutil
 import subprocess
@@ -129,10 +130,16 @@ _jobs: dict[str, dict] = {}
 # The Gemini SDK does not set a default timeout — without this, any
 # hung network call blocks the background job thread forever.
 
-UPLOAD_TIMEOUT_S      = 600   # 10 min  — large files can take time to upload
-TRANSCRIBE_TIMEOUT_S  = 600   # 10 min  — long audio segments to transcribe
-SUMMARIZE_TIMEOUT_S   = 180   #  3 min  — text-only generation is faster
-MASTER_TIMEOUT_S      = 300   #  5 min  — aggregates many segment summaries
+UPLOAD_TIMEOUT_S      = 600    # 10 min  — large files can take time to upload
+TRANSCRIBE_TIMEOUT_S  = 1800   # 30 min  — official Vertex AI max; large inline bytes need it
+SUMMARIZE_TIMEOUT_S   = 1800   # 30 min  — gemini-2.5-pro + long Hebrew output can be slow
+SUMMARIZE_MAX_RETRIES = 3      #  retry on timeout up to this many times before giving up
+MASTER_TIMEOUT_S      = 1800   # 30 min  — aggregates many segment summaries
+
+# Quota (429) retry: wait this range before retrying a RESOURCE_EXHAUSTED error.
+# The quota window is typically 1 minute, so 90-120 s gives a comfortable margin.
+_QUOTA_RETRY_MIN_S = 90
+_QUOTA_RETRY_MAX_S = 120
 
 # Module-level thread pool for Gemini SDK calls.
 # Using a persistent pool avoids the ThreadPoolExecutor shutdown-wait bug
@@ -176,6 +183,14 @@ def _timed(label: str, fn, *args, timeout: int, **kwargs):
         elapsed = time.monotonic() - t0
         _log(f"    ✗ TIMEOUT {label}  ({elapsed:.1f}s > {timeout}s limit)")
         raise TimeoutError(f"'{label}' timed out after {timeout}s")
+
+
+# ── Quota-error detection ──────────────────────────────────────────────────────
+
+def _is_quota_error(exc: Exception) -> bool:
+    """Return True when exc is a Vertex AI 429 RESOURCE_EXHAUSTED response."""
+    s = str(exc)
+    return "429" in s or "RESOURCE_EXHAUSTED" in s.upper()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -239,11 +254,189 @@ def _ensure_semantic_tags(text: str) -> str:
     return text
 
 
-def _get_client(api_key: str) -> genai.Client:
-    key = api_key or os.getenv("GOOGLE_API_KEY", "")
-    if not key:
-        raise ValueError("No Gemini API key. Set GOOGLE_API_KEY in backend/.env")
-    return genai.Client(api_key=key)
+# ── LaTeX normalization ────────────────────────────────────────────────────────
+# remark-math v6 rules that Gemini frequently violates:
+#   • Inline math must start with $ immediately followed by a non-space character.
+#     "$ x $" is NOT parsed — the dollar signs are emitted as plain text.
+#   • Block math ($$...$$) must occupy its own paragraph (blank lines before & after).
+#   • \[...\], \(...\), \begin{equation}...\end{equation} are unknown to remark-math.
+
+_DISPLAY_ENV_RE = re.compile(
+    r'\\begin\{(equation\*?|align\*?|aligned|gather\*?|multline\*?|eqnarray\*?)\}'
+    r'([\s\S]*?)'
+    r'\\end\{(?:equation\*?|align\*?|aligned|gather\*?|multline\*?|eqnarray\*?)\}',
+    re.IGNORECASE,
+)
+
+def _normalize_latex(text: str) -> str:
+    """
+    Convert non-standard LaTeX delimiters to $...$ / $$...$$ and fix spacing
+    issues that prevent remark-math from parsing the expressions.
+    Safe to call multiple times (idempotent on already-normalized output).
+    """
+    if not text:
+        return text
+
+    # 1. \[...\]  →  block math with surrounding blank lines
+    text = re.sub(
+        r'\\\[([\s\S]*?)\\\]',
+        lambda m: f'\n\n$$\n{m.group(1).strip()}\n$$\n\n',
+        text,
+    )
+
+    # 2. \(...\)  →  inline math
+    text = re.sub(
+        r'\\\(([\s\S]*?)\\\)',
+        lambda m: f'${m.group(1).strip()}$',
+        text,
+    )
+
+    # 3. \begin{equation} / align / gather / multline  →  $$...$$
+    text = _DISPLAY_ENV_RE.sub(
+        lambda m: f'\n\n$$\n{m.group(2).strip()}\n$$\n\n',
+        text,
+    )
+
+    # 4. Remove space immediately after opening $ or before closing $:
+    #    "$ expr $" and "$ expr$" both break remark-math v6.
+    text = re.sub(
+        r'\$\s+([^$\n]{1,400}?)\s*\$',
+        lambda m: f'${m.group(1).strip()}$',
+        text,
+    )
+
+    # 5. Collapse runs of 4+ blank lines produced by replacements above
+    text = re.sub(r'\n{4,}', '\n\n\n', text)
+
+    return text
+
+
+# ── Unprotected-LaTeX detection ────────────────────────────────────────────────
+# After normalization, any surviving \command outside $...$ / $$...$$ is a sign
+# that Gemini forgot to wrap a formula — trigger a targeted repair call.
+
+_RAW_MATH_CMD_RE = re.compile(
+    r'(?<![`$\\])'   # not already inside math/code
+    r'\\(?:'
+    r'frac|binom|sqrt|sum|prod|int|oint|lim'
+    r'|bigcup|bigcap|cup|cap|setminus'
+    r'|forall|exists|nexists'
+    r'|alpha|beta|gamma|Gamma|delta|Delta|epsilon|varepsilon'
+    r'|zeta|eta|theta|Theta|iota|kappa|lambda|Lambda|mu|nu|xi|Xi'
+    r'|pi|Pi|rho|sigma|Sigma|tau|upsilon|phi|Phi|chi|psi|Psi|omega|Omega'
+    r'|mathbb|mathbf|mathcal|mathrm|mathit'
+    r'|overline|underline|hat|widehat|tilde|vec|bar|dot|ddot'
+    r'|Rightarrow|Leftarrow|Leftrightarrow|rightarrow|leftarrow'
+    r'|leq|geq|neq|equiv|approx|sim|cong|propto'
+    r'|subset|subseteq|supset|supseteq|in|notin'
+    r'|cdot|cdots|ldots|vdots|times|div|oplus|otimes'
+    r'|left|right|bigl|bigr'
+    r')\b'
+)
+
+def _has_unprotected_latex(text: str) -> bool:
+    """
+    Return True if LaTeX math commands appear outside $...$ / $$...$$ delimiters.
+    Used as a cheap gate before paying for a repair API call.
+    """
+    # Strip math regions so commands inside them don't fire
+    stripped = re.sub(r'\$\$[\s\S]*?\$\$', '', text)
+    stripped = re.sub(r'\$[^$\n]{1,500}\$', '', stripped)
+    # Strip fenced code and inline code
+    stripped = re.sub(r'```[\s\S]*?```', '', stripped)
+    stripped = re.sub(r'`[^`\n]+`', '', stripped)
+    return bool(_RAW_MATH_CMD_RE.search(stripped))
+
+
+# ── LaTeX repair via Gemini ────────────────────────────────────────────────────
+
+_LATEX_REPAIR_SYSTEM = """\
+You receive a Hebrew academic summary that contains LaTeX math.
+Some math expressions are incorrectly delimited: bare \\frac, \\binom, \\sum etc. \
+appear outside dollar signs, or older \\[...\\] / \\(...\\) syntax is used.
+
+Fix ONLY the LaTeX delimiter issues. Do not change any content, Hebrew text, \
+structure, heading levels, or semantic tag markers such as [DEFINITION] or [THEOREM].
+
+Rules:
+- Inline math:  $expression$   (no space after opening $ or before closing $)
+- Block math:   blank line → $$ → formula on its own line(s) → $$ → blank line
+- Every LaTeX command (\\frac, \\binom, \\sum, Greek letters, etc.) must be inside $...$ or $$...$$
+- Return the complete corrected text and nothing else — no commentary, no fences.
+"""
+
+def _repair_latex(text: str, model: str) -> str:
+    """
+    Ask Gemini to fix unprotected LaTeX delimiters in a summary.
+    Returns the repaired text; falls back to the original on any failure.
+    """
+    _log("    [LaTeX repair] Bare LaTeX detected — calling Gemini to fix delimiters…")
+    try:
+        resp = _timed(
+            "generate_content(latex_repair)", _do_generate,
+            _GEMINI_CLIENT, model, text,
+            types.GenerateContentConfig(
+                system_instruction=_LATEX_REPAIR_SYSTEM,
+                temperature=0.0,
+            ),
+            timeout=180,
+        )
+        fixed = (resp.text or "").strip()
+        if not fixed:
+            _log("    [LaTeX repair] Empty response — keeping original")
+            return text
+        _log(f"    [LaTeX repair] Done: {len(text)} → {len(fixed)} chars")
+        return fixed
+    except Exception as exc:
+        _log(f"    [LaTeX repair] Failed ({type(exc).__name__}: {exc}) — keeping original")
+        return text
+
+
+def _apply_latex_fixes(text: str, model: str) -> str:
+    """
+    Full LaTeX post-processing pipeline applied to every LLM summary output:
+      1. Normalize delimiters (regex, free, always)
+      2. Detect remaining unprotected commands
+      3. If found: Gemini repair call + re-normalize
+    """
+    text = _normalize_latex(text)
+    if _has_unprotected_latex(text):
+        text = _repair_latex(text, model)
+        text = _normalize_latex(text)   # normalize the repair output too
+    return text
+
+
+# ── Vertex AI client (module-level singleton) ──────────────────────────────────
+_VERTEX_PROJECT  = "bgu-lecture-vertex"
+_VERTEX_LOCATION = "global"   # Global endpoint: routes to available capacity, reduces 429s
+
+def _resolve_credentials() -> None:
+    """Ensure GOOGLE_APPLICATION_CREDENTIALS is set to an absolute path."""
+    creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if creds and not os.path.isabs(creds):
+        abs_path = str(_ROOT / creds)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
+        creds = abs_path
+    if not creds or not os.path.isfile(creds):
+        raise FileNotFoundError(
+            f"GOOGLE_APPLICATION_CREDENTIALS not set or file not found: '{creds}'. "
+            "Set it in .env to point to your service account JSON."
+        )
+
+_resolve_credentials()
+_GEMINI_CLIENT = genai.Client(
+    vertexai=True,
+    project=_VERTEX_PROJECT,
+    location=_VERTEX_LOCATION,
+    http_options=types.HttpOptions(
+        retry_options=types.HttpRetryOptions(
+            initial_delay=1.0,
+            attempts=5,
+            http_status_codes=[408, 429, 500, 502, 503, 504],
+        ),
+        timeout=30 * 60 * 1000,   # 30 minutes — official Vertex AI maximum
+    ),
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -279,14 +472,6 @@ def split_video(input_path: str, output_dir: str, chunk_sec: int) -> list[str]:
     return [input_path]
 
 
-def _do_upload(client: genai.Client, file_path: str, file_name: str, mime_type: str):
-    """The actual SDK call — run via _timed() so it has a hard timeout."""
-    return client.files.upload(
-        file=file_path,
-        config=types.UploadFileConfig(display_name=file_name, mime_type=mime_type),
-    )
-
-
 def _do_generate(client: genai.Client, model: str, contents, config=None):
     """The actual generate_content SDK call — run via _timed()."""
     kwargs = dict(model=model, contents=contents)
@@ -306,45 +491,23 @@ def transcribe_segment(
     file_mb = os.path.getsize(file_path) / 1_048_576
     _log(f"    File size: {file_mb:.1f} MB  |  MIME: {mime_type}")
 
-    # ── 1. Upload file to Gemini Files API ────────────────────────────────────
-    _log("    Step 1/4: Uploading to Gemini Files API…")
-    gf = _timed(
-        "files.upload", _do_upload,
-        client, file_path, file_name, mime_type,
-        timeout=UPLOAD_TIMEOUT_S,
-    )
-    _log(f"    Uploaded → name={gf.name}  state={gf.state.name}")
+    # ── 1. Read file bytes (Vertex AI uses inline content, not the Files API) ──
+    _log("    Step 1/3: Reading file into memory for inline content…")
+    with open(file_path, "rb") as fh:
+        file_bytes = fh.read()
+    _log(f"    Read {len(file_bytes) / 1_048_576:.1f} MB into memory")
 
-    # ── 2. Poll until ACTIVE ──────────────────────────────────────────────────
-    _log("    Step 2/4: Waiting for Gemini to process file…")
-    poll = 0
-    while gf.state.name == "PROCESSING":
-        time.sleep(4)
-        poll += 1
-        _log(f"      poll #{poll}: state={gf.state.name}")
-        gf = client.files.get(name=gf.name)
-        if poll > 75:
-            try:
-                client.files.delete(name=gf.name)
-            except Exception:
-                pass
-            raise TimeoutError(f"File stuck in PROCESSING after {poll * 4}s: {file_name}")
-
-    _log(f"    File state after polling: {gf.state.name}")
-    if gf.state.name != "ACTIVE":
-        raise RuntimeError(f"File processing failed (state={gf.state.name}): {file_name}")
-
-    # ── 3. Extract frames (video only) ────────────────────────────────────────
+    # ── 2. Extract frames (video only) ────────────────────────────────────────
     frame_parts: list[types.Part] = []
     frames_dir: str | None = None
     is_video = mime_type.startswith("video/")
     if is_video:
-        _log("    Step 3a/4: Extracting frames every 2 minutes…")
+        _log("    Step 2/3: Extracting frames every 1 minute…")
         try:
             frames_dir = tempfile.mkdtemp(prefix="bgu_frames_")
             frame_pattern = os.path.join(frames_dir, "frame_%04d.jpg")
             ffmpeg_result = subprocess.run(
-                ["ffmpeg", "-i", file_path, "-vf", "fps=1/120", "-q:v", "2", frame_pattern],
+                ["ffmpeg", "-i", file_path, "-vf", "fps=1/60", "-q:v", "2", frame_pattern],
                 capture_output=True, text=True, timeout=120,
             )
             if ffmpeg_result.returncode == 0:
@@ -358,16 +521,16 @@ def transcribe_segment(
                         frame_parts.append(
                             types.Part.from_bytes(data=fh.read(), mime_type="image/jpeg")
                         )
-                _log(f"    Extracted {len(frame_parts)} frame(s) for Gemini")
+                _log(f"    Extracted {len(frame_parts)} frame(s)")
             else:
                 _log(f"    Frame extraction failed (exit {ffmpeg_result.returncode}) — continuing without frames")
         except Exception as frame_exc:
             _log(f"    Frame extraction error (non-fatal): {frame_exc} — continuing without frames")
     else:
-        _log("    Step 3a/4: Audio-only file — skipping frame extraction")
+        _log("    Step 2/3: Audio-only file — skipping frame extraction")
 
-    # ── 4. Transcribe ─────────────────────────────────────────────────────────
-    _log("    Step 3b/4: Calling generate_content for transcription…")
+    # ── 3. Transcribe via inline bytes ────────────────────────────────────────
+    _log("    Step 3/3: Calling generate_content for transcription…")
     prompt = (
         "You are transcribing a university lecture. You have access to the video and periodic screenshots.\n\n"
         "Transcribe everything spoken in the lecture completely and accurately.\n"
@@ -379,7 +542,7 @@ def transcribe_segment(
         "Output only the transcript. No commentary or meta-text."
     )
     contents = [types.Content(role="user", parts=[
-        types.Part.from_uri(file_uri=gf.uri, mime_type=gf.mime_type),
+        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
         *frame_parts,
         types.Part(text=prompt),
     ])]
@@ -391,18 +554,10 @@ def transcribe_segment(
     transcript_len = len(resp.text) if resp.text else 0
     _log(f"    Transcription received: {transcript_len} chars")
 
-    # ── 5. Clean up local frames ──────────────────────────────────────────────
+    # ── 4. Clean up local frames ──────────────────────────────────────────────
     if frames_dir and os.path.exists(frames_dir):
         shutil.rmtree(frames_dir, ignore_errors=True)
         _log("    Local frames deleted OK")
-
-    # ── 6. Delete remote file ─────────────────────────────────────────────────
-    _log("    Step 4/4: Deleting remote file…")
-    try:
-        client.files.delete(name=gf.name)
-        _log("    Remote file deleted OK")
-    except Exception as del_exc:
-        _log(f"    Remote file delete failed (non-fatal): {del_exc}")
 
     return resp.text
 
@@ -410,38 +565,67 @@ def transcribe_segment(
 def summarize_segment(
     transcript: str,
     language: str = "Hebrew",
-    api_key: str = "",
     model: str = "gemini-2.5-flash",
 ) -> str:
     """Summarize a single transcript segment using Gemini."""
     if not transcript or not transcript.strip():
         return ""
     _log(f"    Summarising {len(transcript)} chars via Gemini…")
-    try:
-        client = _get_client(api_key)
-        resp = _timed(
-            "generate_content(summarize)", _do_generate,
-            client, model,
-            f"להלן תמלול הרצאה אקדמית. צור סיכום מקיף לפי ההנחיות.\n\nתמלול:\n{transcript}",
-            types.GenerateContentConfig(system_instruction=SUMMARY_SYSTEM_PROMPT),
-            timeout=SUMMARIZE_TIMEOUT_S,
-        )
-        text = resp.text or ""
-        if not text.strip():
-            _log("    Summary response was empty — returning placeholder")
-            return "[הסיכום לא הוחזר מה-API. ייתכן שהתגובה נחסמה או הייתה ריקה. נסה שנית.]"
-        _log(f"    Summary received: {len(text)} chars")
-        text = _strip_correction_sections(text)
-        text = _ensure_semantic_tags(text)
-        return text
-    except Exception as e:
-        return f"[Summarization error: {e}]"
+
+    timeout_attempts = 0
+    quota_attempt    = 0
+
+    while True:
+        try:
+            label = f"generate_content(summarize) attempt t={timeout_attempts+1} q={quota_attempt+1}"
+            resp = _timed(
+                label, _do_generate,
+                _GEMINI_CLIENT, model,
+                f"להלן תמלול הרצאה אקדמית. צור סיכום מקיף לפי ההנחיות.\n\nתמלול:\n{transcript}",
+                types.GenerateContentConfig(system_instruction=SUMMARY_SYSTEM_PROMPT),
+                timeout=SUMMARIZE_TIMEOUT_S,
+            )
+            text = resp.text or ""
+            if not text.strip():
+                _log("    Summary response was empty — returning placeholder")
+                return "[הסיכום לא הוחזר מה-API. ייתכן שהתגובה נחסמה או הייתה ריקה. נסה שנית.]"
+            _log(f"    Summary received: {len(text)} chars")
+            text = _strip_correction_sections(text)
+            text = _ensure_semantic_tags(text)
+            text = _apply_latex_fixes(text, model)
+            return text
+
+        except TimeoutError as e:
+            timeout_attempts += 1
+            _log(f"    ✗ Summarization timed out (attempt {timeout_attempts}/{SUMMARIZE_MAX_RETRIES}): {e}")
+            if timeout_attempts >= SUMMARIZE_MAX_RETRIES:
+                _log(f"    ✗ All {SUMMARIZE_MAX_RETRIES} summarization timeout attempts exhausted")
+                return (
+                    f"[הסיכום נכשל לאחר {SUMMARIZE_MAX_RETRIES} ניסיונות — חריגת זמן ({SUMMARIZE_TIMEOUT_S}s). "
+                    "נסה שנית עם מודל מהיר יותר.]"
+                )
+            wait = 10 * timeout_attempts
+            _log(f"    Retrying after {wait}s…")
+            time.sleep(wait)
+
+        except Exception as e:
+            if _is_quota_error(e):
+                quota_attempt += 1
+                wait = random.randint(_QUOTA_RETRY_MIN_S, _QUOTA_RETRY_MAX_S)
+                _log(
+                    f"    ⏳ 429 RESOURCE_EXHAUSTED on summarization (quota attempt {quota_attempt}) — "
+                    f"waiting {wait}s before retry…"
+                )
+                time.sleep(wait)
+            else:
+                # Non-retriable error (auth failure, malformed request, etc.)
+                _log(f"    ✗ Summarization failed (non-retriable): {e}")
+                return f"[שגיאת סיכום: {e}]"
 
 
 def generate_master_summary(
     chunk_summaries: list[dict],
     language: str = "Hebrew",
-    api_key: str = "",
     model: str = "gemini-2.5-flash",
 ) -> str:
     """Generate a master summary from all chunk summaries using Gemini."""
@@ -454,7 +638,7 @@ def generate_master_summary(
     ])
     _log(f"  Generating master summary from {len(chunk_summaries)} segment(s) via Gemini…")
     try:
-        client = _get_client(api_key)
+        client = _GEMINI_CLIENT
         resp = _timed(
             "generate_content(master_summary)", _do_generate,
             client, model,
@@ -480,6 +664,7 @@ def generate_master_summary(
         _log(f"  Master summary: {len(text)} chars")
         text = _strip_correction_sections(text)
         text = _ensure_semantic_tags(text)
+        text = _apply_latex_fixes(text, model)
         return text
     except Exception as e:
         return f"[Master summary error: {e}]"
@@ -636,7 +821,6 @@ def _kb_build_with_llm(
     raw_blocks:   list[dict],
     existing:     list[dict],
     course_label: str,
-    api_key:      str,
     model:        str,
 ) -> list[dict]:
     """
@@ -671,7 +855,7 @@ def _kb_build_with_llm(
         existing_section = existing_section,
     )
 
-    client = _get_client(api_key)
+    client = _GEMINI_CLIENT
     resp   = _timed(
         "kb_build_with_llm", _do_generate,
         client, model, user_msg,
@@ -786,7 +970,6 @@ def update_knowledge_base(
     course_dir: str,
     file_name:  str,
     master:     str,
-    api_key:    str,
     model:      str,
 ) -> str:
     """
@@ -814,7 +997,7 @@ def update_knowledge_base(
 
         # ── 3. Unified LLM build ────────────────────────────────────────────────
         _log("  [KB] Running kb_builder_skill merge via LLM…")
-        final_items = _kb_build_with_llm(raw_blocks, existing, course_label, api_key, model)
+        final_items = _kb_build_with_llm(raw_blocks, existing, course_label, model)
         _log(f"  [KB] Merged result: {len(final_items)} total item(s)")
 
         # ── 4. Render & save ────────────────────────────────────────────────────
@@ -912,7 +1095,8 @@ def _wip_write_checkpoint(
     transcript: str, summary: str,
 ) -> None:
     d = _wip_dir(course_dir, base_name)
-    d.mkdir(parents=True, exist_ok=True)
+    if not d.exists():
+        return  # WIP dir was deleted (terminated) — silently skip, do not recreate
     (d / f"seg_{seg_idx:03d}_transcript.txt").write_text(transcript, encoding="utf-8")
     (d / f"seg_{seg_idx:03d}_summary.txt").write_text(summary,    encoding="utf-8")
 
@@ -934,6 +1118,19 @@ def _wip_cleanup(course_dir: str, base_name: str) -> None:
     d = _wip_dir(course_dir, base_name)
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _wip_terminate(course_dir: str, wip_name: str) -> bool:
+    """
+    Permanently delete a WIP directory identified by its wip_name
+    (the directory name after stripping the '_wip_' prefix).
+    Returns True if the directory existed and was removed, False if not found.
+    """
+    d = TRANSCRIPTIONS_DIR / course_dir / f"_wip_{wip_name}"
+    if not d.exists():
+        return False
+    shutil.rmtree(d, ignore_errors=True)
+    return True
 
 
 def _wip_list_resumable(course_dir: str) -> list[dict]:
@@ -978,7 +1175,6 @@ def _run_processing_job(
     mime_type: str,
     model: str,
     lang: str,
-    api_key: str,
     test_mode: bool,
     chunk_minutes: int,
     course_dir: str,
@@ -998,7 +1194,7 @@ def _run_processing_job(
 
     _prevent_sleep()
     try:
-        client    = _get_client(api_key)
+        client    = _GEMINI_CLIENT
         lang_hint = LANG_HINTS.get(lang, LANG_HINTS["he"])
         chunk_sec = chunk_minutes * 60
 
@@ -1052,27 +1248,47 @@ def _run_processing_job(
                 _jobs[job_id]["chunks"] = list(chunk_summaries)
                 continue
 
-            # ── Transcribe ────────────────────────────────────────────────────
+            # ── Transcribe (retry indefinitely on 429, fail fast on other errors) ──
             update(f"🎙️ Transcribing segment {seg_num}/{total_seg}…")
             _log(f"  [transcription start]")
-            try:
-                transcript = transcribe_segment(
-                    client, chunk_path, chunk_name, mime_type, lang_hint, model
-                )
-                _log(f"  [transcription end]  {len(transcript)} chars")
-            except Exception as exc:
-                _log(f"  ✗ TRANSCRIPTION FAILED for segment {seg_num}")
-                _log(f"    {type(exc).__name__}: {exc}")
-                _log(traceback.format_exc())
-                update(f"⚠️ Segment {seg_num}/{total_seg} transcription failed — skipping")
-                failed_segments.append(seg_num)
-                continue   # ← skip to next segment, do NOT freeze
+            transcript: str | None = None
+            quota_attempt = 0
+            while True:
+                try:
+                    transcript = transcribe_segment(
+                        client, chunk_path, chunk_name, mime_type, lang_hint, model
+                    )
+                    _log(f"  [transcription end]  {len(transcript)} chars")
+                    break
+                except Exception as exc:
+                    if _is_quota_error(exc):
+                        quota_attempt += 1
+                        wait = random.randint(_QUOTA_RETRY_MIN_S, _QUOTA_RETRY_MAX_S)
+                        _log(
+                            f"  ⏳ 429 RESOURCE_EXHAUSTED on seg {seg_num} "
+                            f"(quota attempt {quota_attempt}) — waiting {wait}s before retry…"
+                        )
+                        update(
+                            f"⏳ Segment {seg_num}/{total_seg}: quota exhausted, "
+                            f"waiting {wait}s… (attempt {quota_attempt})"
+                        )
+                        time.sleep(wait)
+                    else:
+                        _log(f"  ✗ TRANSCRIPTION FAILED for segment {seg_num}")
+                        _log(f"    {type(exc).__name__}: {exc}")
+                        _log(traceback.format_exc())
+                        update(f"⚠️ Segment {seg_num}/{total_seg} transcription failed — skipping")
+                        failed_segments.append(seg_num)
+                        break  # non-quota error: give up on this segment
+
+            if transcript is None:
+                continue   # segment failed for a non-quota reason; move to next
 
             # ── Summarise ─────────────────────────────────────────────────────
             update(f"🤖 Summarising segment {seg_num}/{total_seg}…")
             _log(f"  [summarisation start]")
             try:
-                summary = summarize_segment(transcript, lang, api_key=api_key, model=model)
+                summary = summarize_segment(transcript, lang, model=model)
                 _log(f"  [summarisation end]  {len(summary)} chars")
             except Exception as exc:
                 _log(f"  ✗ SUMMARISATION FAILED for segment {seg_num}")
@@ -1116,7 +1332,7 @@ def _run_processing_job(
             update("🧠 Generating master summary…")
             _log("  [master summary start]")
             try:
-                master = generate_master_summary(chunk_summaries, lang, api_key=api_key, model=model)
+                master = generate_master_summary(chunk_summaries, lang, model=model)
                 _log(f"  [master summary end]  {len(master)} chars")
             except Exception as exc:
                 _log(f"  ✗ MASTER SUMMARY FAILED: {type(exc).__name__}: {exc}")
@@ -1146,7 +1362,7 @@ def _run_processing_job(
 
         # ── Update knowledge base ──────────────────────────────────────────────
         update("📚 Updating knowledge base…")
-        kb_path = update_knowledge_base(course_dir, file_name, master, api_key, model)
+        kb_path = update_knowledge_base(course_dir, file_name, master, model)
         _log(f"  Knowledge base → {kb_path}")
 
         # ── Chat seed ─────────────────────────────────────────────────────────
@@ -1205,7 +1421,6 @@ def _run_transcript_job(
     file_name:  str,
     model:      str,
     lang:       str,
-    api_key:    str,
     course_dir: str,
 ) -> None:
     """
@@ -1246,7 +1461,7 @@ def _run_transcript_job(
 
             update(f"🤖 Summarising segment {seg_num}/{n}…")
             try:
-                summary = summarize_segment(seg_text, lang, api_key=api_key, model=model)
+                summary = summarize_segment(seg_text, lang, model=model)
             except Exception as exc:
                 _log(f"  ✗ SUMMARISATION FAILED for segment {seg_num}: {exc}")
                 summary = seg_text[:500] + "\n\n[סיכום אוטומטי נכשל — נא לעיין בתמלול]"
@@ -1262,7 +1477,7 @@ def _run_transcript_job(
         else:
             update("🧠 Generating master summary…")
             try:
-                master = generate_master_summary(chunk_summaries, lang, api_key=api_key, model=model)
+                master = generate_master_summary(chunk_summaries, lang, model=model)
             except Exception as exc:
                 _log(f"  ✗ MASTER SUMMARY FAILED: {exc}")
                 master = "\n\n---\n\n".join(
@@ -1333,7 +1548,6 @@ class ChatRequest(BaseModel):
     summary_context: str
     chat_history:    list[dict] = []
     model:           str        = "gemini-2.5-flash"
-    api_key:         str        = ""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1352,10 +1566,12 @@ def get_knowledge_base(course_id: str):
     kb_path = SUMMARIES_DIR / course_id / "knowledge_base.md"
     if not kb_path.exists():
         raise HTTPException(status_code=404, detail="not_found")
+    content = kb_path.read_text(encoding="utf-8")
+    content = _normalize_latex(content)
     return {
         "course_id":    course_id,
         "course_label": COURSES[course_id],
-        "content":      kb_path.read_text(encoding="utf-8"),
+        "content":      content,
     }
 
 
@@ -1373,7 +1589,6 @@ async def upload_video(
     chunk_minutes: int        = Form(12),
     test_mode:     bool       = Form(False),
     course_dir:    str        = Form("combinatorics"),
-    api_key:       str        = Form(""),
 ):
     suffix    = pathlib.Path(file.filename or "upload.mp4").suffix.lower()
     mime_type = MIME_MAP.get(suffix, "video/mp4")
@@ -1391,6 +1606,10 @@ async def upload_video(
             pass
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}")
 
+    # Ensure a clean slate: delete any stale WIP directory for this file.
+    # This handles the case where a previous job was terminated or crashed mid-run.
+    _wip_cleanup(course_dir, file_name)
+
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {"status": "queued", "progress": "Queued…"}
     _log(f"UPLOAD ACCEPTED  job={job_id}  file={file_name}  size={len(content)/1_048_576:.1f}MB")
@@ -1399,7 +1618,6 @@ async def upload_video(
         _run_processing_job,
         job_id=job_id, tmp_path=tmp_path, file_name=file_name,
         mime_type=mime_type, model=model, lang=lang,
-        api_key=api_key or os.getenv("GOOGLE_API_KEY", ""),
         test_mode=test_mode, chunk_minutes=chunk_minutes, course_dir=course_dir,
     )
 
@@ -1413,7 +1631,6 @@ async def upload_transcript(
     model:      str        = Form("gemini-2.5-flash"),
     lang:       str        = Form("he"),
     course_dir: str        = Form("combinatorics"),
-    api_key:    str        = Form(""),
 ):
     """
     Fast-track endpoint: accepts a plain-text (.txt) transcript and skips
@@ -1444,7 +1661,6 @@ async def upload_transcript(
         file_name=file_name,
         model=model,
         lang=lang,
-        api_key=api_key or os.getenv("GOOGLE_API_KEY", ""),
         course_dir=course_dir,
     )
 
@@ -1459,6 +1675,21 @@ def list_resumable_jobs(course_id: str):
     return {"jobs": _wip_list_resumable(course_id)}
 
 
+@app.delete("/resumable-jobs/{course_id}/{wip_name}")
+def terminate_resumable_job(course_id: str, wip_name: str):
+    """
+    Permanently delete a checkpointed WIP job so the file can be reprocessed
+    from scratch.  Removes all partial transcripts and summaries for that job.
+    """
+    if course_id not in COURSES:
+        raise HTTPException(status_code=404, detail=f"Unknown course: {course_id}")
+    removed = _wip_terminate(course_id, wip_name)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Interrupted job not found")
+    _log(f"TERMINATED WIP job: course={course_id}  wip_name={wip_name}")
+    return {"status": "terminated", "wip_name": wip_name}
+
+
 @app.post("/resume", response_model=JobStatus)
 async def resume_job(
     background_tasks: BackgroundTasks,
@@ -1467,7 +1698,6 @@ async def resume_job(
     lang:          str        = Form("he"),
     chunk_minutes: int        = Form(12),
     course_dir:    str        = Form("combinatorics"),
-    api_key:       str        = Form(""),
 ):
     """
     Resume a previously interrupted job.  The uploaded file is re-split by
@@ -1510,7 +1740,6 @@ async def resume_job(
         _run_processing_job,
         job_id=job_id, tmp_path=tmp_path, file_name=file_name,
         mime_type=mime_type, model=model, lang=lang,
-        api_key=api_key or os.getenv("GOOGLE_API_KEY", ""),
         test_mode=False, chunk_minutes=chunk_minutes, course_dir=course_dir,
     )
 
@@ -1530,7 +1759,7 @@ def get_job(job_id: str):
 @app.post("/chat")
 def chat(req: ChatRequest):
     try:
-        client              = _get_client(req.api_key)
+        client              = _GEMINI_CLIENT
         tutor_system_prompt = _load_tutor_prompt()
 
         seed_history: list[dict] = [
@@ -1636,6 +1865,7 @@ def get_summary_content(course_id: str, filename: str):
 
     summary = s_path.read_text(encoding="utf-8")
     summary = _ensure_semantic_tags(summary)
+    summary = _normalize_latex(summary)   # fix delimiter issues in stored summaries without a new API call
 
     transcript: str | None = None
     t_path = TRANSCRIPTIONS_DIR / course_id / filename

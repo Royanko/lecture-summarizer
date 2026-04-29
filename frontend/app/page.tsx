@@ -9,7 +9,7 @@ import { AppProvider, useAppState } from "@/lib/AppContext";
 import type { CourseKey } from "@/lib/AppContext";
 import {
   startUploadJob, startTranscriptUploadJob, startJobPolling,
-  fetchResumableJobs, startResumeJob,
+  fetchResumableJobs, startResumeJob, terminateResumableJob,
   fetchSummaryList, fetchSavedSummary, deleteSummary, renameSummary,
 } from "@/lib/api";
 import type { Job, ResumableJob, SavedSummaryMeta } from "@/lib/api";
@@ -64,9 +64,24 @@ function DashboardInner() {
   }, [hydrated, state.result, router]);
 
   // Fetch resumable (interrupted) jobs and summary list whenever course changes.
+  // Clear stale data immediately so the UI never shows one course's list while
+  // selectedCourse already points to a different course — that mismatch is what
+  // causes "Summary not found" when the user clicks Open on a stale item.
   useEffect(() => {
-    fetchResumableJobs(state.selectedCourse).then(setResumableJobs);
-    fetchSummaryList(state.selectedCourse).then(setSummaryList);
+    setSummaryList([]);
+    setResumableJobs([]);
+
+    let cancelled = false;
+
+    fetchResumableJobs(state.selectedCourse).then((jobs) => {
+      if (!cancelled) setResumableJobs(jobs);
+    }).catch(() => {});
+
+    fetchSummaryList(state.selectedCourse).then((list) => {
+      if (!cancelled) setSummaryList(list);
+    });
+
+    return () => { cancelled = true; };
   }, [state.selectedCourse]);
 
   // Per-course summary counts (fetched from backend)
@@ -95,7 +110,6 @@ function DashboardInner() {
           chunkMinutes: state.settings.chunkMinutes,
           testMode,
           courseDir:    state.selectedCourse,
-          apiKey:       state.settings.apiKey || undefined,
         });
 
         // Store the active job so the summary page can resume polling if
@@ -128,13 +142,14 @@ function DashboardInner() {
             return;
           }
 
-          // Navigate to the summary page as soon as the first segment is ready.
-          // The summary page will continue polling for the remaining segments.
+          // Stop polling as soon as the first segment is ready.
+          // The redirect to /summary is handled by the useEffect below (which
+          // runs after sessionStorage is persisted — avoiding the race where
+          // router.push fires before the state is written to sessionStorage).
           if (!navigatedToSummary && updatedJob.chunks && updatedJob.chunks.length > 0) {
             navigatedToSummary = true;
             stop();                        // dashboard stops; summary page takes over
             stopPollingRef.current = null;
-            router.push("/summary");
           }
         });
 
@@ -161,7 +176,6 @@ function DashboardInner() {
           model:     state.settings.model,
           lang:      state.settings.lang,
           courseDir: state.selectedCourse,
-          apiKey:    state.settings.apiKey || undefined,
         });
 
         dispatch({
@@ -194,7 +208,7 @@ function DashboardInner() {
             navigated = true;
             stop();
             stopPollingRef.current = null;
-            router.push("/summary");
+            // redirect handled by useEffect after sessionStorage persistence
           }
         });
 
@@ -222,7 +236,6 @@ function DashboardInner() {
           lang:         target.lang,
           chunkMinutes: target.chunk_minutes,
           courseDir:    target.course_dir,
-          apiKey:       state.settings.apiKey || undefined,
         });
 
         dispatch({
@@ -255,7 +268,7 @@ function DashboardInner() {
             navigated = true;
             stop();
             stopPollingRef.current = null;
-            router.push("/summary");
+            // redirect handled by useEffect after sessionStorage persistence
           }
         });
 
@@ -265,7 +278,21 @@ function DashboardInner() {
         setProcessing(false);
       }
     },
-    [state.settings.apiKey, dispatch, router]
+    [dispatch, router]
+  );
+
+  // ── Terminate an interrupted job ─────────────────────────────────────────
+  const handleTerminate = useCallback(
+    async (job: ResumableJob) => {
+      if (!confirm(`Permanently delete the interrupted job for "${job.file_name}"?\n\nAll partial progress will be lost and the file will need to be reprocessed from scratch.`)) return;
+      try {
+        await terminateResumableJob(job.course_dir, job.wip_name);
+        setResumableJobs((prev) => prev.filter((j) => j.wip_name !== job.wip_name));
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    []
   );
 
   // ── Open a saved summary ─────────────────────────────────────────────────
@@ -292,7 +319,7 @@ function DashboardInner() {
           },
         });
         dispatch({ type: "CLEAR_ACTIVE_JOB" });
-        router.push("/summary");
+        // redirect handled by useEffect after sessionStorage persistence
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : String(err));
       } finally {
@@ -497,17 +524,28 @@ function DashboardInner() {
                         {job.created_at ? ` · started ${new Date(job.created_at).toLocaleDateString()}` : ""}
                       </p>
                     </div>
-                    <button
-                      onClick={() => {
-                        setResumeTarget(job);
-                        resumeFileInputRef.current?.click();
-                      }}
-                      className="shrink-0 bg-amber-500 hover:bg-amber-600 active:bg-amber-700
-                                 text-white font-display font-bold text-sm rounded-lg px-4 py-2
-                                 transition-colors"
-                    >
-                      Resume →
-                    </button>
+                    <div className="flex gap-2 shrink-0">
+                      <button
+                        onClick={() => {
+                          setResumeTarget(job);
+                          resumeFileInputRef.current?.click();
+                        }}
+                        className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700
+                                   text-white font-display font-bold text-sm rounded-lg px-4 py-2
+                                   transition-colors"
+                      >
+                        Resume →
+                      </button>
+                      <button
+                        onClick={() => handleTerminate(job)}
+                        className="border border-red-300 hover:bg-red-50 active:bg-red-100
+                                   text-red-600 font-display font-bold text-sm rounded-lg px-3 py-2
+                                   transition-colors"
+                        title="Delete this interrupted job and start fresh"
+                      >
+                        Terminate
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>
