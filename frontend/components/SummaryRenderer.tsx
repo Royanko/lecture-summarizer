@@ -6,6 +6,7 @@ import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import type { QuizData, QuizQuestion } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ function parseSegments(text: string): Segment[] {
     const subtitle =
       colonIdx >= 0
         ? heading.slice(colonIdx + 1).trim()
-        : heading.replace(/^[^\u0590-\u05FFa-zA-Z0-9(]+/, "").trim();
+        : heading.replace(/^[^֐-׿a-zA-Z0-9(]+/, "").trim();
     hits.push({ start: m.index!, end: m.index! + m[0].length, tagType, subtitle });
   }
 
@@ -236,6 +237,111 @@ function parseSegments(text: string): Segment[] {
   return segments;
 }
 
+// ── Quiz question component ────────────────────────────────────────────────────
+
+const CHOICE_LETTERS = ["א", "ב", "ג", "ד"];
+
+function QuizQuestionCard({
+  question,
+  onChatRequest,
+}: {
+  question: QuizQuestion;
+  onChatRequest?: (prefill: string) => void;
+}) {
+  const [selected, setSelected] = useState<number | null>(null);
+
+  function handleChoice(idx: number) {
+    if (selected !== null) return; // one attempt only
+    setSelected(idx);
+  }
+
+  const answered = selected !== null;
+  const correct  = selected === question.answer_idx;
+
+  return (
+    <div className="quiz-question" dir="rtl">
+      {/* Question header */}
+      <div className="quiz-question__header">
+        <span className="quiz-question__num">שאלה {question.num}</span>
+        <span className="quiz-question__text">{question.text}</span>
+        {onChatRequest && (
+          <button
+            className="quiz-chat-btn"
+            title="שאל את המורה על שאלה זו"
+            onClick={() => onChatRequest(`לגבי שאלה ${question.num}: `)}
+            aria-label="שאל את המורה"
+          >
+            💬
+          </button>
+        )}
+      </div>
+
+      {/* Choices */}
+      <div className="quiz-question__choices">
+        {question.choices.map((choice, idx) => {
+          let cls = "quiz-choice";
+          if (answered) {
+            if (idx === question.answer_idx) cls += " quiz-choice--correct";
+            else if (idx === selected)       cls += " quiz-choice--wrong";
+            else                             cls += " quiz-choice--dim";
+          } else {
+            cls += " quiz-choice--idle";
+          }
+          return (
+            <button
+              key={idx}
+              className={cls}
+              onClick={() => handleChoice(idx)}
+              disabled={answered}
+            >
+              <span className="quiz-choice__letter">{CHOICE_LETTERS[idx]}.</span>
+              <span className="quiz-choice__text">{choice.replace(/^[א-ד]\.\s*/, "")}</span>
+              {answered && idx === question.answer_idx && (
+                <span className="quiz-choice__icon">✓</span>
+              )}
+              {answered && idx === selected && idx !== question.answer_idx && (
+                <span className="quiz-choice__icon">✗</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Feedback */}
+      {answered && (
+        <p className={`quiz-feedback ${correct ? "quiz-feedback--correct" : "quiz-feedback--wrong"}`}>
+          {correct ? "✅ נכון!" : `❌ לא נכון — התשובה הנכונה היא: ${question.choices[question.answer_idx]}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function QuizBlock({
+  questions,
+  position,
+  onChatRequest,
+}: {
+  questions: QuizQuestion[];
+  position: "mid" | "end";
+  onChatRequest?: (prefill: string) => void;
+}) {
+  const label = position === "mid" ? "שאלות חזרה — אמצע הרצאה" : "שאלות חזרה — סיום הרצאה";
+  return (
+    <div className="quiz-block" dir="rtl">
+      <div className="quiz-block__header">
+        <span className="quiz-block__icon">{position === "mid" ? "📝" : "🏁"}</span>
+        <span className="quiz-block__title">{label}</span>
+      </div>
+      <div className="quiz-block__questions">
+        {questions.map((q) => (
+          <QuizQuestionCard key={q.num} question={q} onChatRequest={onChatRequest} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── SummaryRenderer ───────────────────────────────────────────────────────────
 
 // Wrapped in memo so typing in the chat input (which triggers SummaryPageInner
@@ -243,98 +349,150 @@ function parseSegments(text: string): Segment[] {
 const SummaryRenderer = memo(function SummaryRenderer({
   text,
   showCardNumbers = false,
+  quizData,
+  onChatRequest,
 }: {
-  text: string;
+  text:            string;
   showCardNumbers?: boolean;
+  quizData?:       QuizData;
+  onChatRequest?:  (prefill: string) => void;
 }) {
   const segments = parseSegments(text);
+
+  // Count total semantic cards first (needed to know where to splice the mid quiz)
+  const totalCards = segments.filter((s) => s.type !== "text").length;
+  const midInsertAfter = Math.floor(totalCards / 2);
 
   // Separate counter for semantic cards only (text segments are not counted).
   // Must be a plain variable — map() is synchronous so sequential mutation is safe.
   let cardCounter = 0;
 
-  return (
-    <div className="summary-prose">
-      {segments.map((seg, i) => {
-        if (seg.type === "text") {
-          return (
+  const midBlock = quizData?.blocks.find((b) => b.position === "mid");
+  const endBlock = quizData?.blocks.find((b) => b.position === "end");
+
+  const rendered: React.ReactNode[] = [];
+
+  segments.forEach((seg, i) => {
+    if (seg.type === "text") {
+      rendered.push(
+        <ReactMarkdown
+          key={i}
+          remarkPlugins={[remarkMath, remarkGfm]}
+          rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false, errorColor: "inherit" }], rehypeRaw]}
+          components={summaryComponents}
+        >
+          {seg.content}
+        </ReactMarkdown>
+      );
+      return;
+    }
+
+    cardCounter++;
+    const cardNum = cardCounter;
+    const cfg = TAG_CONFIG[seg.type];
+    const headerText = seg.title
+      ? `${cfg.emoji} ${cfg.label}: ${seg.title}`
+      : `${cfg.emoji} ${cfg.label}`;
+
+    // Build the card label for the chat prefill
+    const cardLabel = seg.title
+      ? `${cfg.label}: ${seg.title}`
+      : cfg.label;
+
+    rendered.push(
+      <div
+        key={i}
+        className={`semantic-card semantic-card--${cfg.cls}`}
+        data-card-idx={cardNum}
+      >
+        {/* Header — flex row so the card-number badge sits on the
+            physical-left end while the title flows RTL on the right */}
+        <div
+          className="semantic-card__header"
+          style={{ display: "flex", alignItems: "center" }}
+        >
+          <div style={{ flex: 1 }}>
             <ReactMarkdown
-              key={i}
               remarkPlugins={[remarkMath, remarkGfm]}
-              rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false, errorColor: "inherit" }], rehypeRaw]}
-              components={summaryComponents}
+              rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+              components={{ p: ({ children }) => <>{children}</> }}
             >
-              {seg.content}
+              {headerText}
             </ReactMarkdown>
-          );
-        }
-
-        cardCounter++;
-        const cardNum = cardCounter;
-
-        const cfg = TAG_CONFIG[seg.type];
-        const headerText = seg.title
-          ? `${cfg.emoji} ${cfg.label}: ${seg.title}`
-          : `${cfg.emoji} ${cfg.label}`;
-
-        return (
-          <div
-            key={i}
-            className={`semantic-card semantic-card--${cfg.cls}`}
-            {...(showCardNumbers ? { "data-card-idx": cardNum } : {})}
-          >
-            {/* Header — flex row so the card-number badge sits on the
-                physical-left end while the title flows RTL on the right */}
-            <div
-              className="semantic-card__header"
-              style={{ display: "flex", alignItems: "center" }}
-            >
-              <div style={{ flex: 1 }}>
-                <ReactMarkdown
-                  remarkPlugins={[remarkMath, remarkGfm]}
-                  rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
-                  components={{ p: ({ children }) => <>{children}</> }}
-                >
-                  {headerText}
-                </ReactMarkdown>
-              </div>
-
-              {showCardNumbers && (
-                <span
-                  dir="ltr"
-                  style={{
-                    flexShrink: 0,
-                    marginRight: "0.6rem",   // gap from title in RTL flow
-                    fontSize: "0.7rem",
-                    fontFamily: "Inter, system-ui, sans-serif",
-                    fontWeight: 500,
-                    opacity: 0.5,
-                    background: "rgba(0,0,0,0.07)",
-                    borderRadius: "0.35rem",
-                    padding: "0.15rem 0.45rem",
-                    letterSpacing: "0.02em",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  כרטיס {cardNum}
-                </span>
-              )}
-            </div>
-
-            <div className="semantic-card__body">
-              <ReactMarkdown
-                remarkPlugins={[remarkMath, remarkGfm]}
-                rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
-                components={summaryComponents}
-              >
-                {seg.content}
-              </ReactMarkdown>
-            </div>
           </div>
-        );
-      })}
-    </div>
-  );
+
+          {/* Chat icon */}
+          {onChatRequest && (
+            <button
+              className="card-chat-btn"
+              title={`שאל את המורה על ${cardLabel}`}
+              onClick={() => onChatRequest(`לגבי כרטיס ${cardNum} (${cardLabel}): `)}
+              aria-label="שאל את המורה"
+            >
+              💬
+            </button>
+          )}
+
+          {showCardNumbers && (
+            <span
+              dir="ltr"
+              style={{
+                flexShrink: 0,
+                marginRight: "0.6rem",
+                fontSize: "0.7rem",
+                fontFamily: "Inter, system-ui, sans-serif",
+                fontWeight: 500,
+                opacity: 0.5,
+                background: "rgba(0,0,0,0.07)",
+                borderRadius: "0.35rem",
+                padding: "0.15rem 0.45rem",
+                letterSpacing: "0.02em",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {cardNum}
+            </span>
+          )}
+        </div>
+
+        <div className="semantic-card__body">
+          <ReactMarkdown
+            remarkPlugins={[remarkMath, remarkGfm]}
+            rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+            components={summaryComponents}
+          >
+            {seg.content}
+          </ReactMarkdown>
+        </div>
+      </div>
+    );
+
+    // Splice mid-quiz block after the midpoint card
+    if (midBlock && cardCounter === midInsertAfter) {
+      rendered.push(
+        <QuizBlock
+          key="quiz-mid"
+          questions={midBlock.questions}
+          position="mid"
+          onChatRequest={onChatRequest}
+        />
+      );
+    }
+  });
+
+  // Append end-quiz block after last card
+  if (endBlock) {
+    rendered.push(
+      <QuizBlock
+        key="quiz-end"
+        questions={endBlock.questions}
+        position="end"
+        onChatRequest={onChatRequest}
+      />
+    );
+  }
+
+  return <div className="summary-prose">{rendered}</div>;
 });
 
 export default SummaryRenderer;

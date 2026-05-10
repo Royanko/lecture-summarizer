@@ -118,10 +118,13 @@ interface SegmentNavigatorProps {
   onPrev:         () => void;
   onNext:         () => void;
   onJump:         (idx: number) => void;
+  activeCardIdx?: number;
+  totalCards?:    number;
 }
 
 const SegmentNavigator = memo(function SegmentNavigator({
   currentIdx, totalLoaded, totalExpected, isProcessing, progress, onPrev, onNext, onJump,
+  activeCardIdx, totalCards,
 }: SegmentNavigatorProps) {
   const countLabel = totalExpected !== null
     ? `${totalLoaded} / ${totalExpected}`
@@ -208,6 +211,15 @@ const SegmentNavigator = memo(function SegmentNavigator({
       {isProcessing && progress && (
         <p className="text-xs text-slate-500 truncate">{progress}</p>
       )}
+
+      {/* Card counter */}
+      {totalCards !== undefined && totalCards > 0 && (
+        <div className="flex justify-end">
+          <span className="font-mono text-xs text-slate-400 tabular-nums" dir="ltr">
+            {activeCardIdx ?? 1}/{totalCards}
+          </span>
+        </div>
+      )}
     </div>
   );
 });
@@ -217,12 +229,23 @@ const SegmentNavigator = memo(function SegmentNavigator({
 // not the heavy SummaryPageInner with all its semantic cards.
 
 interface ChatInputProps {
-  disabled: boolean;
-  onSend:   (msg: string) => void;
+  disabled:    boolean;
+  onSend:      (msg: string) => void;
+  prefillText?: string;
+  prefillKey?:  number;
 }
 
-const ChatInput = memo(function ChatInput({ disabled, onSend }: ChatInputProps) {
+const ChatInput = memo(function ChatInput({ disabled, onSend, prefillText, prefillKey }: ChatInputProps) {
   const [value, setValue] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // When prefillKey changes, populate the textarea and focus it
+  useEffect(() => {
+    if (prefillKey === undefined || prefillKey === 0) return;
+    setValue(prefillText ?? "");
+    textareaRef.current?.focus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillKey]);
 
   function handleSend() {
     const msg = value.trim();
@@ -239,6 +262,7 @@ const ChatInput = memo(function ChatInput({ disabled, onSend }: ChatInputProps) 
     <div className="px-5 py-4 border-t border-slate-200 bg-white shrink-0">
       <div className="flex gap-2 items-end">
         <textarea
+          ref={textareaRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -340,6 +364,11 @@ function SummaryPageInner() {
   const [activeCardIdx, setActiveCardIdx] = useState(1);
   const [totalCards,    setTotalCards]    = useState(0);
 
+  // ── Segment-view card counter (IntersectionObserver) ──────────────────────
+  const segScrollRef       = useRef<HTMLDivElement>(null);
+  const [activeSegCardIdx, setActiveSegCardIdx] = useState(1);
+  const [totalSegCards,    setTotalSegCards]    = useState(0);
+
   useEffect(() => {
     if (!showMasterSummary || !masterScrollRef.current) {
       setTotalCards(0);
@@ -369,11 +398,47 @@ function SummaryPageInner() {
     return () => observer.disconnect();
   }, [showMasterSummary]);
 
+  useEffect(() => {
+    if (showMasterSummary || showTranscript || !segScrollRef.current) {
+      setTotalSegCards(0);
+      return;
+    }
+    const root  = segScrollRef.current;
+    const cards = Array.from(root.querySelectorAll<HTMLElement>("[data-card-idx]"));
+    setTotalSegCards(cards.length);
+    if (cards.length === 0) return;
+    setActiveSegCardIdx(1);
+
+    const visible = new Set<number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const idx = parseInt(entry.target.getAttribute("data-card-idx") ?? "0", 10);
+          if (entry.isIntersecting) visible.add(idx);
+          else visible.delete(idx);
+        });
+        if (visible.size > 0) setActiveSegCardIdx(Math.min(...visible));
+      },
+      { root, threshold: 0 },
+    );
+    cards.forEach((card) => observer.observe(card));
+    return () => observer.disconnect();
+  }, [showMasterSummary, showTranscript, currentSegIdx, result?.chunks.length]);
+
   // ── Chat state ─────────────────────────────────────────────────────────────
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError,   setChatError]   = useState<string | null>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
+
+  // ── Chat prefill (from quiz/card chat icons) ───────────────────────────────
+  const [prefillText, setPrefillText] = useState("");
+  const [prefillKey,  setPrefillKey]  = useState(0);
+
+  const handleChatRequest = useCallback((text: string) => {
+    setPrefillText(text);
+    setPrefillKey((k) => k + 1);
+  }, []);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -563,6 +628,8 @@ function SummaryPageInner() {
             onPrev={handlePrev}
             onNext={handleNext}
             onJump={handleJump}
+            activeCardIdx={totalSegCards > 0 ? activeSegCardIdx : undefined}
+            totalCards={totalSegCards > 0 ? totalSegCards : undefined}
           />
         )}
 
@@ -570,7 +637,12 @@ function SummaryPageInner() {
         {showMasterSummary ? (
           /* ── Master Summary panel ── */
           <div ref={masterScrollRef} className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
-            <SummaryRenderer text={result.summary} showCardNumbers />
+            <SummaryRenderer
+              text={result.summary}
+              showCardNumbers
+              quizData={result.quiz ?? undefined}
+              onChatRequest={handleChatRequest}
+            />
           </div>
         ) : showTranscript ? (
           /* ── Transcript panel ── */
@@ -604,9 +676,9 @@ function SummaryPageInner() {
           </div>
         ) : (
           /* ── Segment summary ── */
-          <div className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
+          <div ref={segScrollRef} className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
             {currentChunk ? (
-              <SummaryRenderer text={currentChunk.summary} />
+              <SummaryRenderer text={currentChunk.summary} showCardNumbers onChatRequest={handleChatRequest} />
             ) : (
               <div className="flex items-center gap-3 text-slate-400 text-sm">
                 <div className="w-4 h-4 border-2 border-slate-300 border-t-bgu-orange rounded-full animate-spin" />
@@ -627,9 +699,8 @@ function SummaryPageInner() {
                      shadow-lg"
           dir="ltr"
         >
-          <span className="text-slate-400 text-xs font-medium">כרטיס</span>
           <span className="text-bgu-orange font-bold text-sm tabular-nums">{activeCardIdx}</span>
-          <span className="text-slate-500 text-xs">מתוך</span>
+          <span className="text-slate-500 text-xs">{'‎'}מתוך{'‎'}</span>
           <span className="text-white font-semibold text-sm tabular-nums">{totalCards}</span>
         </div>
       )}
@@ -712,7 +783,12 @@ function SummaryPageInner() {
         </div>
 
         {/* Input — rendered by ChatInput which owns its own state */}
-        <ChatInput disabled={chatLoading} onSend={handleSend} />
+        <ChatInput
+          disabled={chatLoading}
+          onSend={handleSend}
+          prefillText={prefillText}
+          prefillKey={prefillKey}
+        />
       </section>
     </div>
   );
