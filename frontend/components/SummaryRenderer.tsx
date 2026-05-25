@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { memo, useEffect, useId, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -155,6 +155,51 @@ const summaryComponents = {
   },
 };
 
+// ── LaTeX normalization ───────────────────────────────────────────────────────
+
+/**
+ * Normalizes LaTeX delimiters in raw markdown text before it reaches remark-math.
+ *
+ * 1. Wraps every $$...$$ block with blank lines so remark-math promotes it to
+ *    block-level (display) math rather than leaving it inline. Also strips any
+ *    leading/trailing spaces on the $$ line so they don't become whitespace-only
+ *    "blank" lines that confuse the paragraph parser.
+ * 2. Collapses runs of 3+ newlines back to 2.
+ * 3. Strips the leading indentation from the line immediately after each $$
+ *    block when it has 4+ leading spaces. The blank line inserted in step 1
+ *    turns any indented list continuation (including 8-space nested-list
+ *    items) into an indented code block; removing the indent restores normal
+ *    paragraph rendering. Lines with <4 leading spaces are untouched (they
+ *    never trigger code-block parsing).
+ * 4. Inserts a space between Hebrew characters and adjacent $ delimiters so
+ *    inline math is not visually glued to surrounding RTL text.
+ */
+function normalizeLatex(text: string): string {
+  // Step 1: ensure blank lines around display-math blocks.
+  // [ \t]* strips leading/trailing horizontal whitespace on the $$ line so it
+  // does not become a whitespace-only line that remark treats as a paragraph break.
+  let out = text.replace(
+    /[ \t]*\$\$([\s\S]*?)\$\$[ \t]*/g,
+    (_, inner: string) => `\n\n$$${inner}$$\n\n`,
+  );
+  // Step 2: collapse 3+ newlines to exactly 2
+  out = out.replace(/\n{3,}/g, "\n\n");
+  // Step 3: globally strip 4+ leading spaces from every line that follows a
+  // blank line (\n\n). The Step-1 replacement lifts $$...$$ blocks to
+  // column 0 by consuming the original leading indent, which breaks any
+  // surrounding list context. Once the list is broken, ALL subsequent
+  // blank-line + 4-space-indented lines are parsed by remark as indented
+  // code blocks — including lines that come after *original* blank lines
+  // (e.g. the blank line between "שלב 1" and "שלב 2" within a 3-step
+  // proof), not just lines immediately after a $$ block. Stripping 4+
+  // leading spaces globally prevents those indented code blocks while
+  // keeping unindented content untouched.
+  out = out.replace(/\n\n {4,}/g, "\n\n");
+  // Step 4: space between Hebrew chars and $ (U+0590-05FF and U+FB1D-FB4F)
+  out = out.replace(/([֐-׿יִ-ﭏ])\$/g, "$1 $");
+  out = out.replace(/\$([֐-׿יִ-ﭏ])/g, "$ $1");
+  return out;
+}
 // ── Segment parser ────────────────────────────────────────────────────────────
 
 /**
@@ -357,7 +402,10 @@ const SummaryRenderer = memo(function SummaryRenderer({
   quizData?:       QuizData;
   onChatRequest?:  (prefill: string) => void;
 }) {
-  const segments = parseSegments(text);
+  const segments = parseSegments(text).map((seg) => ({
+    ...seg,
+    content: normalizeLatex(seg.content),
+  }));
 
   // Count total semantic cards first (needed to know where to splice the mid quiz)
   const totalCards = segments.filter((s) => s.type !== "text").length;
@@ -450,7 +498,7 @@ const SummaryRenderer = memo(function SummaryRenderer({
                 whiteSpace: "nowrap",
               }}
             >
-              {cardNum}
+              {cardNum}/{totalCards}
             </span>
           )}
         </div>
