@@ -362,7 +362,7 @@ function QuizQuestionCard({
   );
 }
 
-function QuizBlock({
+export function QuizBlock({
   questions,
   position,
   onChatRequest,

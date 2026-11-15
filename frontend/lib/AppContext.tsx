@@ -13,7 +13,7 @@ import React, {
   useEffect,
   useState,
 } from "react";
-import type { Job } from "@/lib/api";
+import type { Job, QuizData } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ export type CourseKey =
   | "calculus"
   | "linear_algebra_2";
 export type LangKey  = "he" | "en" | "ar";
-export type ModelKey = "gemini-2.5-flash" | "gemini-2.5-pro";
+export type ModelKey = "gemini-3.6-flash" | "gemini-4-hydrogen" | "gemini-3.5-flash-lite";
 
 export interface AppSettings {
   model:        ModelKey;
@@ -51,6 +51,7 @@ export interface AppResult {
   savedSummary:    string | null;
   savedTranscript: string | null;
   totalSegments:   number;
+  quiz:            QuizData | null;
 }
 
 /**
@@ -94,7 +95,7 @@ type Action =
 
 const DEFAULT_STATE: AppState = {
   settings: {
-    model:        "gemini-2.5-flash",
+    model:        "gemini-3.6-flash",
     lang:         "he",
     chunkMinutes: 12,
   },
@@ -162,6 +163,7 @@ function reducer(state: AppState, action: Action): AppState {
         savedSummary:    null,
         savedTranscript: null,
         totalSegments:   0,
+        quiz:            null,
       };
 
       const updatedResult: AppResult = {
@@ -176,6 +178,7 @@ function reducer(state: AppState, action: Action): AppState {
           chatSeed:        job.chat_seed       ?? baseResult.chatSeed,
           savedSummary:    job.saved_summary   ?? baseResult.savedSummary,
           savedTranscript: job.saved_transcript ?? baseResult.savedTranscript,
+          quiz:            job.quiz            ?? baseResult.quiz,
         }),
       };
 

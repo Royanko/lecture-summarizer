@@ -102,6 +102,10 @@ function DashboardInner() {
       setProcessing(true);
       setProgress("Uploading file…");
 
+      // Clear any stale result from a previous session so its chunks cannot
+      // be merged into the new job's state before the first segment arrives.
+      dispatch({ type: "CLEAR_RESULT" });
+
       try {
         const job = await startUploadJob({
           file,
@@ -142,14 +146,14 @@ function DashboardInner() {
             return;
           }
 
-          // Stop polling as soon as the first segment is ready.
-          // The redirect to /summary is handled by the useEffect below (which
-          // runs after sessionStorage is persisted — avoiding the race where
-          // router.push fires before the state is written to sessionStorage).
+          // Navigate as soon as the first segment is ready.
+          // router.replace is async; React's persist effect will complete
+          // before the summary page actually mounts and reads sessionStorage.
           if (!navigatedToSummary && updatedJob.chunks && updatedJob.chunks.length > 0) {
             navigatedToSummary = true;
-            stop();                        // dashboard stops; summary page takes over
+            stop();
             stopPollingRef.current = null;
+            router.replace("/summary");
           }
         });
 
@@ -169,6 +173,8 @@ function DashboardInner() {
       setError(null);
       setProcessing(true);
       setProgress("Uploading transcript…");
+
+      dispatch({ type: "CLEAR_RESULT" });
 
       try {
         const job = await startTranscriptUploadJob({
@@ -208,7 +214,7 @@ function DashboardInner() {
             navigated = true;
             stop();
             stopPollingRef.current = null;
-            // redirect handled by useEffect after sessionStorage persistence
+            router.replace("/summary");
           }
         });
 
@@ -228,6 +234,8 @@ function DashboardInner() {
       setError(null);
       setProcessing(true);
       setProgress("Re-uploading file for resume…");
+
+      dispatch({ type: "CLEAR_RESULT" });
 
       try {
         const job = await startResumeJob({
@@ -268,7 +276,7 @@ function DashboardInner() {
             navigated = true;
             stop();
             stopPollingRef.current = null;
-            // redirect handled by useEffect after sessionStorage persistence
+            router.replace("/summary");
           }
         });
 
@@ -316,6 +324,7 @@ function DashboardInner() {
             savedSummary:    null,
             savedTranscript: null,
             totalSegments:   1,
+            quiz:            null,
           },
         });
         dispatch({ type: "CLEAR_ACTIVE_JOB" });

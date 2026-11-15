@@ -28,6 +28,22 @@ const BACKEND_URL =
 
 export type JobStatus = "queued" | "processing" | "done" | "error";
 
+export interface QuizQuestion {
+  num:        number;
+  text:       string;
+  choices:    string[];
+  answer_idx: number;
+}
+
+export interface QuizBlock {
+  position:  "mid" | "end";
+  questions: QuizQuestion[];
+}
+
+export interface QuizData {
+  blocks: QuizBlock[];
+}
+
 export interface Job {
   job_id:           string;
   status:           JobStatus;
@@ -39,6 +55,7 @@ export interface Job {
   saved_summary:    string | null;
   saved_transcript: string | null;
   total_segments:   number | null;
+  quiz:             QuizData | null;
   error:            string | null;
 }
 

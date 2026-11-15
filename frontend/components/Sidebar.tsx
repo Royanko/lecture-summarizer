@@ -4,8 +4,9 @@ import { useAppState } from "@/lib/AppContext";
 import type { ModelKey, LangKey } from "@/lib/AppContext";
 
 const MODELS: { id: ModelKey; label: string }[] = [
-  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash ⚡ (Recommended)" },
-  { id: "gemini-2.5-pro",   label: "Gemini 2.5 Pro 🧠 (Most Capable)" },
+  { id: "gemini-3.6-flash",      label: "Gemini 3.6 Flash ⚡ (Recommended)" },
+  { id: "gemini-4-hydrogen",     label: "Gemini 4 Hydrogen 🧠 (Most Capable)" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite 🪶 (Lightest)" },
 ];
 
 const LANGS: { id: LangKey; label: string }[] = [

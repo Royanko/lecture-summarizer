@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Overview
-A web app that takes lecture recordings (MP4/MP3/WAV/M4A) or plain-text transcripts, transcribes them via Vertex AI (inline bytes), produces structured RTL Hebrew summaries per chunk with styled semantic cards, and provides an interactive tutoring chat grounded in the transcript. Each course also maintains an auto-updating **Knowledge Base** — a deduplicated, topic-organised exam study guide.
+A web app that takes lecture recordings (MP4/MP3/WAV/M4A) or plain-text transcripts, transcribes them via the Gemini API, produces structured RTL Hebrew summaries per chunk with styled semantic cards, and provides an interactive tutoring chat grounded in the transcript. Each course also maintains an auto-updating **Knowledge Base** — a deduplicated, topic-organised exam study guide.
 
 **Architecture**: Next.js 15 frontend + FastAPI backend (two separate processes).
 
@@ -13,10 +13,11 @@ A web app that takes lecture recordings (MP4/MP3/WAV/M4A) or plain-text transcri
 - **Python 3.14** with a `.venv` virtualenv
 - **FastAPI** + **uvicorn** — REST API server on `http://localhost:8000`
 - **`google-genai`** — Gemini API client (`from google import genai`). NEW package. Do NOT use `google-generativeai` (deprecated).
-- **Vertex AI** — the client is initialised with `genai.Client(vertexai=True, project="bgu-lecture-vertex", location="us-central1")`. Auth uses `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service-account JSON, NOT `GOOGLE_API_KEY`.
-- **`python-dotenv`** — loads env vars from `.env` (root or `backend/`)
+- **Gemini Developer API (API key)** — the client is initialised with `genai.Client(api_key=...)`, reading `GOOGLE_API_KEY` (or `GEMINI_API_KEY`). Vertex AI is no longer used (the Google Cloud project was closed in Nov 2026). Keys come from https://aistudio.google.com/apikey.
+- **`python-dotenv`** — loads env vars from the root `.env`, then `backend/.env` (the key lives in `backend/.env`)
 - **ffmpeg** (system binary) — splits files >500 MB into configurable chunks
-- **Models**: `gemini-2.5-flash` (default), `gemini-2.5-pro` (selectable)
+- **Models**: `gemini-3.6-flash` (default), `gemini-4-hydrogen`, `gemini-3.5-flash-lite` (selectable). The old `gemini-2.5-*` ids (deprecated by Google, rerouted 2026-12-01) are mapped forward by `_resolve_model()` so old WIP checkpoints and browser sessions keep working.
+- **Free tier**: roughly 5 requests/minute and ~20 requests/day per model (check https://aistudio.google.com/rate-limit). A full lecture uses about 2 requests per segment plus 3; the 429 backoff and WIP resume handle hitting the limit.
 
 ### Frontend (`frontend/`)
 - **Next.js 15** (React 18, TypeScript)
@@ -32,7 +33,7 @@ backend/
   main.py               # FastAPI app — all processing logic + KB pipeline
   build_kb.py           # One-shot script: rebuild KB from an existing master summary
   requirements.txt
-  .env                  # GOOGLE_APPLICATION_CREDENTIALS=... and GOOGLE_API_KEY=... (not committed)
+  .env                  # GOOGLE_API_KEY=... (not committed)
 frontend/
   app/
     page.tsx            # Dashboard — course cards, upload, KB banner, resume interrupted jobs
@@ -101,31 +102,31 @@ Key behaviours:
 ## Processing Flow (`backend/main.py`)
 1. **Receive file** via `/upload`; save to temp dir
 2. **Large file**: `split_video()` uses ffmpeg to cut into configurable-length chunks (default 12 min)
-3. **Per chunk** — `transcribe_segment()`: reads file into memory as inline bytes → `generate_content` with `inline_data` Part + frame images (video) via Vertex AI
+3. **Per chunk** — `transcribe_segment()`: media ≤ 20 MB (`INLINE_MAX_BYTES`) is sent as inline bytes; larger media is uploaded through the Files API (poll until processed, deleted after the call) → `generate_content` with the media Part + frame images (video)
 4. **Per chunk** — `summarize_segment()`: `generate_content` with transcript + `summary_skill.txt`
 5. **Master summary** — `generate_master_summary()`: combines all chunk summaries
 6. **Save outputs** — `save_outputs()`: writes to `summaries/<course>/` and `transcriptions/`
 7. **Knowledge Base** — `update_knowledge_base()`: 5-step pipeline (see below)
 8. **Chat** — `/chat` rebuilds `client.chats.create(...)` from `history` plain dicts on every request
 
-## Key google.genai / Vertex AI Patterns
+## Key google.genai Patterns
 ```python
 from google import genai
 from google.genai import types
 
-# Client uses Vertex AI (service account credentials, not API key)
-client = genai.Client(vertexai=True, project="bgu-lecture-vertex", location="us-central1")
+# Client uses the Gemini Developer API with an API key
+client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# Transcription — inline bytes (Vertex AI does NOT support the Files API)
-with open(file_path, "rb") as fh:
-    file_bytes = fh.read()
+# Transcription — inline bytes for small media
+part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+# ...or the Files API for media over INLINE_MAX_BYTES (free, 2 GB/file, auto-deleted after 48h)
+f = client.files.upload(file=file_path, config=types.UploadFileConfig(mime_type=mime_type))
+part = types.Part.from_uri(file_uri=f.uri, mime_type=mime_type)   # after f.state leaves PROCESSING
 
 r = client.models.generate_content(model=MODEL, contents=[
-    types.Content(role="user", parts=[
-        types.Part(inline_data=types.Blob(mime_type=mime_type, data=file_bytes)),
-        types.Part(text="prompt"),
-    ])
+    types.Content(role="user", parts=[part, types.Part(text="prompt")])
 ])
+client.files.delete(name=f.name)
 
 # Generate text only (with system instruction)
 r = client.models.generate_content(model=MODEL, contents="text",
@@ -140,7 +141,7 @@ chat = client.chats.create(
 response = chat.send_message("question")
 ```
 
-**`build_kb.py`** is the exception: it uses the regular Gemini API with `GOOGLE_API_KEY` (not Vertex AI). Both keys should be in `.env`.
+**`build_kb.py`** uses the same `GOOGLE_API_KEY`.
 
 ## Knowledge Base Pipeline (`backend/main.py`)
 Triggered automatically at the end of every job. Source: master summary only.
@@ -249,7 +250,7 @@ There is no automated test suite — verify changes by running the app end-to-en
 
 ## Important Constraints
 - **Do not switch to `google-generativeai`** — use `google-genai` only
-- **Do not use the Files API** — Vertex AI uses inline bytes for transcription, not `client.files.upload()`
+- **Do not switch back to Vertex AI** — the backend uses the Gemini Developer API with an API key; large media goes through the Files API
 - **Chat must be rebuilt from history plain dicts** on every `/chat` request (no persistent chat object)
 - **`skills/tutor_chat_skill.txt` must not be modified**
 - The `.env` file is not committed to git

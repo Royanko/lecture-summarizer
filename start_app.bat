@@ -30,6 +30,10 @@ if not exist "%ROOT%\backend\.env" (
     echo  The app will fall back to the root .env file.
 )
 
+:: ── Kill any stale processes on ports 3000 and 8000 ──────────────────────────
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":3000 " ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8000 " ^| findstr LISTENING') do taskkill /PID %%a /F >nul 2>&1
+
 :: ── Launch FastAPI backend in its own window ──────────────────────────────────
 echo  Starting FastAPI backend on http://localhost:8000 ...
 start "BGU Backend  [FastAPI:8000]" cmd /k ^

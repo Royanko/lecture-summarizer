@@ -1,5 +1,6 @@
 # API keys & secrets
 .env
+bgu-lecture-vertex-e14d21fd2966.json
 
 # Large media files
 recordings/
@@ -29,6 +30,10 @@ frontend/node_modules/
 
 # Next.js build output
 frontend/.next/
+frontend/tsconfig.tsbuildinfo
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Private interview prep (never publish)
+interview-prep/

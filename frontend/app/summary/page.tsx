@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
@@ -9,8 +9,8 @@ import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import { AppProvider, useAppState } from "@/lib/AppContext";
 import { sendChatMessage, startJobPolling } from "@/lib/api";
-import type { Job } from "@/lib/api";
-import SummaryRenderer from "@/components/SummaryRenderer";
+import type { Job, QuizBlock as QuizBlockData } from "@/lib/api";
+import SummaryRenderer, { QuizBlock as QuizBlockUI } from "@/components/SummaryRenderer";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -462,6 +462,27 @@ function SummaryPageInner() {
     setCurrentSegIdx(idx);
   }, []);
 
+  // ── Quiz blocks for the current segment ───────────────────────────────────
+  // Show the mid-quiz on roughly the middle segment, and the end-quiz on the
+  // last segment. For a single-segment lecture both blocks appear together.
+  const segmentQuizBlocks = useMemo((): QuizBlockData[] => {
+    if (!result?.quiz) return [];
+    if (activeJob?.status === "processing" || activeJob?.status === "queued") return [];
+    const total = result.chunks.length;
+    if (total === 0) return [];
+    const midAt  = Math.floor((total - 1) / 2);
+    const blocks: QuizBlockData[] = [];
+    if (currentSegIdx === midAt) {
+      const b = result.quiz.blocks.find((b) => b.position === "mid");
+      if (b) blocks.push(b);
+    }
+    if (currentSegIdx === total - 1) {
+      const b = result.quiz.blocks.find((b) => b.position === "end");
+      if (b) blocks.push(b);
+    }
+    return blocks;
+  }, [result?.quiz, result?.chunks.length, currentSegIdx, activeJob?.status]);
+
   // ── Pre-hydration render ───────────────────────────────────────────────────
   if (!hydrated) return <PageSkeleton />;
   if (!result || result.chunks.length === 0) return <PageSkeleton />;
@@ -505,7 +526,7 @@ function SummaryPageInner() {
       const reply = await sendChatMessage({
         userMessage:    msg,
         summaryContext: chatSummaryContext,
-        chatHistory:    newHistory.map((h) => ({ role: h.role, text: h.text })),
+        chatHistory:    chatHistory.map((h) => ({ role: h.role, text: h.text })),
         model:          state.settings.model,
       });
       setChatHistory((prev) => [...prev, { role: "model", text: reply }]);
@@ -678,7 +699,17 @@ function SummaryPageInner() {
           /* ── Segment summary ── */
           <div ref={segScrollRef} className="flex-1 overflow-y-auto px-10 py-8" dir="rtl" lang="he">
             {currentChunk ? (
-              <SummaryRenderer text={currentChunk.summary} showCardNumbers onChatRequest={handleChatRequest} />
+              <>
+                <SummaryRenderer text={currentChunk.summary} showCardNumbers onChatRequest={handleChatRequest} />
+                {segmentQuizBlocks.map((block) => (
+                  <QuizBlockUI
+                    key={block.position}
+                    questions={block.questions}
+                    position={block.position}
+                    onChatRequest={handleChatRequest}
+                  />
+                ))}
+              </>
             ) : (
               <div className="flex items-center gap-3 text-slate-400 text-sm">
                 <div className="w-4 h-4 border-2 border-slate-300 border-t-bgu-orange rounded-full animate-spin" />

@@ -59,6 +59,7 @@ _env_file = _ROOT / ".env"
 try:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=_env_file, override=True)
+    load_dotenv(dotenv_path=pathlib.Path(__file__).parent / ".env", override=True)
 except ImportError:
     if _env_file.exists():
         for _line in _env_file.read_text(encoding="utf-8").splitlines():
@@ -88,7 +89,22 @@ RECORDINGS_DIR     = _ROOT / "recordings"
 SUMMARIES_DIR      = _ROOT / "summaries"
 TRANSCRIPTIONS_DIR = _ROOT / "transcriptions"
 
-AVAILABLE_MODELS: list[str] = ["gemini-2.5-flash", "gemini-2.5-pro"]
+DEFAULT_MODEL = "gemini-3.6-flash"
+AVAILABLE_MODELS: list[str] = [DEFAULT_MODEL, "gemini-4-hydrogen", "gemini-3.5-flash-lite"]
+
+# Gemini 2.5 models are deprecated (rerouted by Google on 2026-12-01). Old WIP
+# checkpoints and browser sessions may still send them, so map them forward.
+_LEGACY_MODELS: dict[str, str] = {
+    "gemini-2.5-flash": DEFAULT_MODEL,
+    "gemini-2.5-pro":   "gemini-4-hydrogen",
+}
+
+def _resolve_model(model: str) -> str:
+    return _LEGACY_MODELS.get(model, model)
+
+# Media up to this size is sent inline; anything larger goes through the
+# Files API (Gemini Developer API: 100 MB max request, 2 GB max per file).
+INLINE_MAX_BYTES = 20 * 1_048_576
 
 MIME_MAP: dict[str, str] = {
     ".mp4": "video/mp4",
@@ -131,15 +147,17 @@ _jobs: dict[str, dict] = {}
 # hung network call blocks the background job thread forever.
 
 UPLOAD_TIMEOUT_S      = 600    # 10 min  — large files can take time to upload
-TRANSCRIBE_TIMEOUT_S  = 1800   # 30 min  — official Vertex AI max; large inline bytes need it
-SUMMARIZE_TIMEOUT_S   = 1800   # 30 min  — gemini-2.5-pro + long Hebrew output can be slow
+TRANSCRIBE_TIMEOUT_S  = 1800   # 30 min  — large media segments need it
+SUMMARIZE_TIMEOUT_S   = 1800   # 30 min  — larger models + long Hebrew output can be slow
 SUMMARIZE_MAX_RETRIES = 3      #  retry on timeout up to this many times before giving up
 MASTER_TIMEOUT_S      = 1800   # 30 min  — aggregates many segment summaries
 
-# Quota (429) retry: wait this range before retrying a RESOURCE_EXHAUSTED error.
-# The quota window is typically 1 minute, so 90-120 s gives a comfortable margin.
-_QUOTA_RETRY_MIN_S = 90
-_QUOTA_RETRY_MAX_S = 120
+# Quota (429) retry — exponential backoff.
+# With Google's 5 RPM free-tier limit (reduced Dec 2025), fixed short waits are
+# not enough: the quota needs time to actually reset.
+# Strategy: 2 min → 4 → 8 → 16 → 30 min cap, with ±10 % jitter.
+_QUOTA_BACKOFF_BASE_S = 120   # first wait: 2 min
+_QUOTA_BACKOFF_MAX_S  = 1800  # cap: 30 min
 
 # Module-level thread pool for Gemini SDK calls.
 # Using a persistent pool avoids the ThreadPoolExecutor shutdown-wait bug
@@ -185,12 +203,59 @@ def _timed(label: str, fn, *args, timeout: int, **kwargs):
         raise TimeoutError(f"'{label}' timed out after {timeout}s")
 
 
-# ── Quota-error detection ──────────────────────────────────────────────────────
+# ── Quota-error detection & smart backoff ─────────────────────────────────────
 
 def _is_quota_error(exc: Exception) -> bool:
-    """Return True when exc is a Vertex AI 429 RESOURCE_EXHAUSTED response."""
+    """Return True when exc is a Gemini API 429 RESOURCE_EXHAUSTED response."""
     s = str(exc)
     return "429" in s or "RESOURCE_EXHAUSTED" in s.upper()
+
+
+def _extract_retry_after(exc: Exception) -> float | None:
+    """
+    Try to read the exact wait time the API embedded in the 429 error body.
+    Gemini API errors often contain {"retryDelay": "NNs"} in their JSON
+    payload, and HTTP 429 responses may include a Retry-After header value.
+    Returns seconds as a float, or None if nothing parseable was found.
+    """
+    s = str(exc)
+    # gRPC body: {"retryDelay": "120s"}
+    m = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', s)
+    if m:
+        return float(m.group(1))
+    # HTTP header: Retry-After: 120
+    m = re.search(r'[Rr]etry-[Aa]fter[:\s]+(\d+)', s)
+    if m:
+        return float(m.group(1))
+    # x-ratelimit-reset-requests: <seconds or ms>
+    m = re.search(r'x-ratelimit-reset[^:]*[:\s]+(\d+(?:\.\d+)?)', s, re.IGNORECASE)
+    if m:
+        val = float(m.group(1))
+        return val / 1000.0 if val > 10_000 else val  # convert ms → s if needed
+    return None
+
+
+def _quota_backoff_seconds(attempt: int, exc: Exception | None = None) -> float:
+    """
+    Return how many seconds to sleep before the next quota-retry.
+
+    Priority:
+    1. Retry-After / retryDelay value embedded in the error (if present).
+    2. Exponential backoff: base * 2^(attempt-1), capped at _QUOTA_BACKOFF_MAX_S.
+    A ±10 % jitter is applied in both cases.
+    """
+    if exc is not None:
+        server_wait = _extract_retry_after(exc)
+        if server_wait is not None:
+            jitter = server_wait * random.uniform(-0.05, 0.05)
+            wait = max(60.0, server_wait + jitter)
+            _log(f"    ℹ️  Using server-supplied Retry-After: {server_wait:.0f}s (with jitter → {wait:.0f}s)")
+            return wait
+
+    raw = _QUOTA_BACKOFF_BASE_S * (2 ** (attempt - 1))
+    capped = min(raw, _QUOTA_BACKOFF_MAX_S)
+    jitter = capped * random.uniform(-0.1, 0.1)
+    return capped + jitter
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -394,47 +459,36 @@ def _repair_latex(text: str, model: str) -> str:
 
 def _apply_latex_fixes(text: str, model: str) -> str:
     """
-    Full LaTeX post-processing pipeline applied to every LLM summary output:
-      1. Normalize delimiters (regex, free, always)
-      2. Detect remaining unprotected commands
-      3. If found: Gemini repair call + re-normalize
+    Regex-only LaTeX normalisation. The Gemini repair call has been removed
+    because the summary prompt now instructs the model to emit correct
+    delimiters from the start. Regex normalisation is kept as a free
+    safety net for any minor delimiter drift.
     """
-    text = _normalize_latex(text)
-    if _has_unprotected_latex(text):
-        text = _repair_latex(text, model)
-        text = _normalize_latex(text)   # normalize the repair output too
-    return text
+    return _normalize_latex(text)
 
 
-# ── Vertex AI client (module-level singleton) ──────────────────────────────────
-_VERTEX_PROJECT  = "bgu-lecture-vertex"
-_VERTEX_LOCATION = "global"   # Global endpoint: routes to available capacity, reduces 429s
+# ── Gemini API client (module-level singleton) ─────────────────────────────────
+# Uses the Gemini Developer API with an API key from backend/.env (or root .env).
+_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
+if not _API_KEY:
+    _log(
+        "[WARN] GOOGLE_API_KEY is not set. Gemini calls will fail until you add "
+        "GOOGLE_API_KEY=<your key> to backend/.env (get one at https://aistudio.google.com/apikey)."
+    )
 
-def _resolve_credentials() -> None:
-    """Ensure GOOGLE_APPLICATION_CREDENTIALS is set to an absolute path."""
-    creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if creds and not os.path.isabs(creds):
-        abs_path = str(_ROOT / creds)
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = abs_path
-        creds = abs_path
-    if not creds or not os.path.isfile(creds):
-        raise FileNotFoundError(
-            f"GOOGLE_APPLICATION_CREDENTIALS not set or file not found: '{creds}'. "
-            "Set it in .env to point to your service account JSON."
-        )
-
-_resolve_credentials()
 _GEMINI_CLIENT = genai.Client(
-    vertexai=True,
-    project=_VERTEX_PROJECT,
-    location=_VERTEX_LOCATION,
+    api_key=_API_KEY or "missing-api-key",
     http_options=types.HttpOptions(
         retry_options=types.HttpRetryOptions(
             initial_delay=1.0,
-            attempts=5,
-            http_status_codes=[408, 429, 500, 502, 503, 504],
+            attempts=3,
+            # 429 is intentionally absent: quota errors need exponential backoff
+            # that only our application-level code can provide.  Letting the SDK
+            # fire short retries first would burn quota capacity and bypass our
+            # Retry-After extraction.
+            http_status_codes=[408, 500, 502, 503, 504],
         ),
-        timeout=30 * 60 * 1000,   # 30 minutes — official Vertex AI maximum
+        timeout=30 * 60 * 1000,   # 30 minutes
     ),
 )
 
@@ -474,7 +528,7 @@ def split_video(input_path: str, output_dir: str, chunk_sec: int) -> list[str]:
 
 def _do_generate(client: genai.Client, model: str, contents, config=None):
     """The actual generate_content SDK call — run via _timed()."""
-    kwargs = dict(model=model, contents=contents)
+    kwargs = dict(model=_resolve_model(model), contents=contents)
     if config is not None:
         kwargs["config"] = config
     return client.models.generate_content(**kwargs)
@@ -491,11 +545,29 @@ def transcribe_segment(
     file_mb = os.path.getsize(file_path) / 1_048_576
     _log(f"    File size: {file_mb:.1f} MB  |  MIME: {mime_type}")
 
-    # ── 1. Read file bytes (Vertex AI uses inline content, not the Files API) ──
-    _log("    Step 1/3: Reading file into memory for inline content…")
-    with open(file_path, "rb") as fh:
-        file_bytes = fh.read()
-    _log(f"    Read {len(file_bytes) / 1_048_576:.1f} MB into memory")
+    # ── 1. Prepare the media part: inline bytes, or Files API for large files ──
+    uploaded = None
+    if os.path.getsize(file_path) <= INLINE_MAX_BYTES:
+        _log("    Step 1/3: Reading file into memory for inline content…")
+        with open(file_path, "rb") as fh:
+            media_part = types.Part.from_bytes(data=fh.read(), mime_type=mime_type)
+    else:
+        _log("    Step 1/3: Uploading file via the Files API…")
+        uploaded = _timed(
+            "files.upload", client.files.upload,
+            file=file_path,
+            config=types.UploadFileConfig(mime_type=mime_type),
+            timeout=UPLOAD_TIMEOUT_S,
+        )
+        deadline = time.monotonic() + UPLOAD_TIMEOUT_S
+        while uploaded.state and uploaded.state.name == "PROCESSING":
+            if time.monotonic() > deadline:
+                raise TimeoutError("Uploaded file was still PROCESSING after the upload timeout")
+            time.sleep(5)
+            uploaded = client.files.get(name=uploaded.name)
+        if uploaded.state and uploaded.state.name == "FAILED":
+            raise RuntimeError("Gemini could not process the uploaded file")
+        media_part = types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime_type)
 
     # ── 2. Extract frames (video only) ────────────────────────────────────────
     frame_parts: list[types.Part] = []
@@ -529,7 +601,7 @@ def transcribe_segment(
     else:
         _log("    Step 2/3: Audio-only file — skipping frame extraction")
 
-    # ── 3. Transcribe via inline bytes ────────────────────────────────────────
+    # ── 3. Transcribe ─────────────────────────────────────────────────────────
     _log("    Step 3/3: Calling generate_content for transcription…")
     prompt = (
         "You are transcribing a university lecture. You have access to the video and periodic screenshots.\n\n"
@@ -542,15 +614,22 @@ def transcribe_segment(
         "Output only the transcript. No commentary or meta-text."
     )
     contents = [types.Content(role="user", parts=[
-        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+        media_part,
         *frame_parts,
         types.Part(text=prompt),
     ])]
-    resp = _timed(
-        "generate_content(transcribe)", _do_generate,
-        client, model, contents,
-        timeout=TRANSCRIBE_TIMEOUT_S,
-    )
+    try:
+        resp = _timed(
+            "generate_content(transcribe)", _do_generate,
+            client, model, contents,
+            timeout=TRANSCRIBE_TIMEOUT_S,
+        )
+    finally:
+        if uploaded is not None:
+            try:
+                client.files.delete(name=uploaded.name)
+            except Exception as del_exc:
+                _log(f"    Could not delete uploaded file (auto-expires in 48h): {del_exc}")
     transcript_len = len(resp.text) if resp.text else 0
     _log(f"    Transcription received: {transcript_len} chars")
 
@@ -565,7 +644,7 @@ def transcribe_segment(
 def summarize_segment(
     transcript: str,
     language: str = "Hebrew",
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_MODEL,
 ) -> str:
     """Summarize a single transcript segment using Gemini."""
     if not transcript or not transcript.strip():
@@ -611,10 +690,10 @@ def summarize_segment(
         except Exception as e:
             if _is_quota_error(e):
                 quota_attempt += 1
-                wait = random.randint(_QUOTA_RETRY_MIN_S, _QUOTA_RETRY_MAX_S)
+                wait = _quota_backoff_seconds(quota_attempt, e)
                 _log(
-                    f"    ⏳ 429 RESOURCE_EXHAUSTED on summarization (quota attempt {quota_attempt}) — "
-                    f"waiting {wait}s before retry…"
+                    f"    ⏳ 429 RESOURCE_EXHAUSTED on summarization "
+                    f"(quota attempt {quota_attempt}) — waiting {wait:.0f}s before retry…"
                 )
                 time.sleep(wait)
             else:
@@ -626,7 +705,7 @@ def summarize_segment(
 def generate_master_summary(
     chunk_summaries: list[dict],
     language: str = "Hebrew",
-    model: str = "gemini-2.5-flash",
+    model: str = DEFAULT_MODEL,
 ) -> str:
     """Generate a master summary from all chunk summaries using Gemini."""
     if not chunk_summaries:
@@ -637,37 +716,112 @@ def generate_master_summary(
         if c.get("summary")
     ])
     _log(f"  Generating master summary from {len(chunk_summaries)} segment(s) via Gemini…")
+    prompt = (
+        "להלן סיכומי הסגמנטים של הרצאה אקדמית שלמה. "
+        "אחד אותם לסיכום מאסטר אחד שמכיל:\n"
+        "1. סקירה כללית של כל ההרצאה (5-7 משפטים)\n"
+        "2. רצף מלא של כל יחידות התוכן (הגדרות, משפטים, הוכחות, תרגילים) לפי סדרן\n"
+        "3. גלוסרי מאוחד של כל המונחחים\n\n"
+        f"{combined}"
+    )
+    quota_attempt = 0
+    while True:
+        try:
+            resp = _timed(
+                f"generate_content(master_summary) q={quota_attempt+1}", _do_generate,
+                _GEMINI_CLIENT, model, prompt,
+                types.GenerateContentConfig(system_instruction=SUMMARY_SYSTEM_PROMPT),
+                timeout=MASTER_TIMEOUT_S,
+            )
+            text = resp.text or ""
+            if not text.strip():
+                _log("  Master summary response was empty — returning concatenated fallback")
+                return "\n\n---\n\n".join(
+                    f"**חלק {c['idx'] + 1}**\n{c.get('summary', '')}"
+                    for c in chunk_summaries
+                )
+            _log(f"  Master summary: {len(text)} chars")
+            text = _strip_correction_sections(text)
+            text = _ensure_semantic_tags(text)
+            text = _apply_latex_fixes(text, model)
+            return text
+        except Exception as e:
+            if _is_quota_error(e):
+                quota_attempt += 1
+                wait = _quota_backoff_seconds(quota_attempt, e)
+                _log(
+                    f"  ⏳ 429 RESOURCE_EXHAUSTED on master summary "
+                    f"(quota attempt {quota_attempt}) — waiting {wait:.0f}s before retry…"
+                )
+                time.sleep(wait)
+            else:
+                _log(f"  ✗ Master summary failed (non-retriable): {e}")
+                return f"[Master summary error: {e}]"
+
+
+_QUIZ_SYSTEM = (
+    "אתה עוזר שיוצר שאלות חזרה על הרצאה אקדמית.\n"
+    "צור שאלות בעברית בלבד.\n"
+    "החזר JSON בלבד — ללא הסבר, ללא markdown, ללא ```.\n"
+    "פורמט חובה:\n"
+    '{"blocks":[{"position":"mid","questions":[{"num":1,"text":"שאלה?","choices":["א. ...","ב. ...","ג. ...","ד. ..."],"answer_idx":0}]},{"position":"end","questions":[{"num":3,"text":"שאלה?","choices":["א. ...","ב. ...","ג. ...","ד. ..."],"answer_idx":2}]}]}\n'
+    "כללים:\n"
+    "- בלוק mid: 2-3 שאלות על הנושאים הראשונים (כחצי ראשון של ההרצאה)\n"
+    "- בלוק end: 2-3 שאלות על כלל ההרצאה\n"
+    "- ממספור הכולל: שאלות mid מתחילות ב-1, שאלות end ממשיכות מאיפה שעצרנו\n"
+    "- choices: תמיד 4 תשובות — א, ב, ג, ד\n"
+    "- answer_idx: אינדקס התשובה הנכונה (0-3)\n"
+    "- השאלות מבוססות על הגדרות, משפטים, הוכחות ותרגילים מהסיכום"
+)
+
+_QUIZ_TIMEOUT_S = 120
+
+
+def generate_quiz(
+    chunk_summaries: list[dict],
+    model: str = DEFAULT_MODEL,
+) -> dict | None:
+    """
+    Generate an interactive quiz for the master summary.
+    Returns a dict with shape {blocks: [{position, questions: [{num, text, choices, answer_idx}]}]}
+    or None on failure.
+    """
+    if not chunk_summaries:
+        return None
+    combined = "\n\n---\n\n".join([
+        f"### חלק {i + 1}\n{c.get('summary', '')}"
+        for i, c in enumerate(chunk_summaries)
+        if c.get("summary")
+    ])
+    prompt = f"להלן סיכום הרצאה אקדמית. צור שאלות חזרה לפי הפורמט שהוגדר:\n\n{combined}"
     try:
         client = _GEMINI_CLIENT
         resp = _timed(
-            "generate_content(master_summary)", _do_generate,
-            client, model,
-            (
-                "להלן סיכומי הסגמנטים של הרצאה אקדמית שלמה. "
-                "אחד אותם לסיכום מאסטר אחד שמכיל:\n"
-                "1. סקירה כללית של כל ההרצאה (5-7 משפטים)\n"
-                "2. רצף מלא של כל יחידות התוכן (הגדרות, משפטים, הוכחות, תרגילים) לפי סדרן\n"
-                "3. גלוסרי מאוחד של כל המונחים\n"
-                "4. 8-10 שאלות חזרה על כל ההרצאה\n\n"
-                f"{combined}"
+            "generate_content(quiz)", _do_generate,
+            client, model, prompt,
+            types.GenerateContentConfig(
+                system_instruction=_QUIZ_SYSTEM,
+                response_mime_type="application/json",
             ),
-            types.GenerateContentConfig(system_instruction=SUMMARY_SYSTEM_PROMPT),
-            timeout=MASTER_TIMEOUT_S,
+            timeout=_QUIZ_TIMEOUT_S,
         )
-        text = resp.text or ""
-        if not text.strip():
-            _log("  Master summary response was empty — returning concatenated fallback")
-            return "\n\n---\n\n".join(
-                f"**חלק {c['idx'] + 1}**\n{c.get('summary', '')}"
-                for c in chunk_summaries
-            )
-        _log(f"  Master summary: {len(text)} chars")
-        text = _strip_correction_sections(text)
-        text = _ensure_semantic_tags(text)
-        text = _apply_latex_fixes(text, model)
-        return text
-    except Exception as e:
-        return f"[Master summary error: {e}]"
+        text = (resp.text or "").strip()
+        if not text:
+            _log("  Quiz response was empty")
+            return None
+        # Strip markdown code fences if the model ignored our instruction
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        # Remove invalid backslash escapes (e.g. \p, \v) that json.loads() rejects.
+        # Valid JSON escape chars after \: " \ / b f n r t u
+        text = re.sub(r'\\(?!["\\/bfnrtu])', r'', text)
+        data = _json.loads(text)
+        _log(f"  Quiz generated: {sum(len(b.get('questions', [])) for b in data.get('blocks', []))} questions")
+        return data
+    except Exception as exc:
+        _log(f"  ✗ Quiz generation failed: {exc}")
+        return None
 
 
 def split_text_into_segments(text: str, words_per_chunk: int = 2500) -> list[str]:
@@ -1155,7 +1309,7 @@ def _wip_list_resumable(course_dir: str) -> list[dict]:
             "wip_name":       entry.name[5:],   # strip "_wip_" prefix
             "done_segments":  done,
             "total_segments": meta.get("total_segments", 0),
-            "model":          meta.get("model", "gemini-2.5-flash"),
+            "model":          meta.get("model", DEFAULT_MODEL),
             "lang":           meta.get("lang", "he"),
             "course_dir":     course_dir,
             "chunk_minutes":  meta.get("chunk_minutes", 20),
@@ -1263,14 +1417,14 @@ def _run_processing_job(
                 except Exception as exc:
                     if _is_quota_error(exc):
                         quota_attempt += 1
-                        wait = random.randint(_QUOTA_RETRY_MIN_S, _QUOTA_RETRY_MAX_S)
+                        wait = _quota_backoff_seconds(quota_attempt, exc)
                         _log(
                             f"  ⏳ 429 RESOURCE_EXHAUSTED on seg {seg_num} "
-                            f"(quota attempt {quota_attempt}) — waiting {wait}s before retry…"
+                            f"(quota attempt {quota_attempt}) — waiting {wait:.0f}s before retry…"
                         )
                         update(
                             f"⏳ Segment {seg_num}/{total_seg}: quota exhausted, "
-                            f"waiting {wait}s… (attempt {quota_attempt})"
+                            f"waiting {wait:.0f}s… (attempt {quota_attempt})"
                         )
                         time.sleep(wait)
                     else:
@@ -1311,6 +1465,12 @@ def _run_processing_job(
             _jobs[job_id]["chunks"] = list(chunk_summaries)
             update(f"✅ Segment {seg_num}/{total_seg} ready")
             _log(f"  Chunk published. Total published: {len(chunk_summaries)}")
+
+            # ── Inter-segment delay (paces to ~4 RPM, below the 5 RPM quota) ──
+            if not test_mode and i < len(chunks) - 1:
+                _log("  ⏸ Waiting 15s before next segment to stay under quota…")
+                update(f"⏸ Segment {seg_num}/{total_seg} done — waiting 15s before next…")
+                time.sleep(15)
 
         # ── End of loop summary ───────────────────────────────────────────────
         _log(f"\n{'-'*60}")
@@ -1365,6 +1525,12 @@ def _run_processing_job(
         kb_path = update_knowledge_base(course_dir, file_name, master, model)
         _log(f"  Knowledge base → {kb_path}")
 
+        # ── Generate quiz ─────────────────────────────────────────────────────
+        quiz: dict | None = None
+        if not test_mode:
+            update("❓ Generating quiz…")
+            quiz = generate_quiz(chunk_summaries, model=model)
+
         # ── Chat seed ─────────────────────────────────────────────────────────
         chat_seed = [
             {"role": "user",  "text": f"סיכום מאסטר של ההרצאה:\n{master}"},
@@ -1381,6 +1547,7 @@ def _run_processing_job(
             "saved_summary":    s_path,
             "saved_transcript": t_path,
             "total_segments":   n_display,
+            "quiz":             quiz,
             **({"error": f"{len(failed_segments)} segment(s) failed and were skipped: {failed_segments}. You can resume the job to process the missing segments."} if failed_segments else {}),
         })
 
@@ -1489,6 +1656,15 @@ def _run_transcript_job(
         update("💾 Saving outputs…")
         s_path, t_path = save_outputs(course_dir, file_name, master, text.strip())
 
+        # ── Update knowledge base ─────────────────────────────────────────────
+        update("📚 Updating knowledge base…")
+        kb_path = update_knowledge_base(course_dir, file_name, master, model)
+        _log(f"  Knowledge base → {kb_path}")
+
+        # ── Generate quiz ─────────────────────────────────────────────────────
+        update("❓ Generating quiz…")
+        quiz = generate_quiz(chunk_summaries, model=model)
+
         chat_seed = [
             {"role": "user",  "text": f"סיכום מאסטר של ההרצאה:\n{master}"},
             {"role": "model", "text": "קראתי את סיכום ההרצאה. אני מוכן ללמד אותך נושא אחד בכל פעם!"},
@@ -1504,6 +1680,7 @@ def _run_transcript_job(
             "saved_summary":    s_path,
             "saved_transcript": t_path,
             "total_segments":   n,
+            "quiz":             quiz,
         })
 
         _log(f"\n{'='*70}")
@@ -1540,6 +1717,7 @@ class JobStatus(BaseModel):
     saved_summary:    str | None       = None
     saved_transcript: str | None       = None
     total_segments:   int | None       = None
+    quiz:             dict | None      = None
     error:            str | None       = None
 
 
@@ -1547,7 +1725,7 @@ class ChatRequest(BaseModel):
     user_message:    str
     summary_context: str
     chat_history:    list[dict] = []
-    model:           str        = "gemini-2.5-flash"
+    model:           str        = DEFAULT_MODEL
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1584,7 +1762,7 @@ def list_models():
 async def upload_video(
     background_tasks: BackgroundTasks,
     file:          UploadFile = File(...),
-    model:         str        = Form("gemini-2.5-flash"),
+    model:         str        = Form(DEFAULT_MODEL),
     lang:          str        = Form("he"),
     chunk_minutes: int        = Form(12),
     test_mode:     bool       = Form(False),
@@ -1628,7 +1806,7 @@ async def upload_video(
 async def upload_transcript(
     background_tasks: BackgroundTasks,
     file:       UploadFile = File(...),
-    model:      str        = Form("gemini-2.5-flash"),
+    model:      str        = Form(DEFAULT_MODEL),
     lang:       str        = Form("he"),
     course_dir: str        = Form("combinatorics"),
 ):
@@ -1694,7 +1872,7 @@ def terminate_resumable_job(course_id: str, wip_name: str):
 async def resume_job(
     background_tasks: BackgroundTasks,
     file:          UploadFile = File(...),
-    model:         str        = Form("gemini-2.5-flash"),
+    model:         str        = Form(DEFAULT_MODEL),
     lang:          str        = Form("he"),
     chunk_minutes: int        = Form(12),
     course_dir:    str        = Form("combinatorics"),
@@ -1768,16 +1946,21 @@ def chat(req: ChatRequest):
         ]
 
         chat_obj = client.chats.create(
-            model=req.model,
+            model=_resolve_model(req.model),
             config=types.GenerateContentConfig(system_instruction=tutor_system_prompt),
             history=[
-                types.Content(role=h["role"], parts=[types.Part(text=h["text"])])
+                types.Content(role=h["role"], parts=[types.Part(text=h.get("text") or "")])
                 for h in seed_history + req.chat_history
             ],
         )
         response = chat_obj.send_message(req.user_message)
-        return {"reply": response.text}
+        reply = response.text
+        if not reply:
+            raise HTTPException(status_code=503, detail="התגובה חסומה או ריקה. נסה שנית.")
+        return {"reply": reply}
 
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

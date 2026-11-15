@@ -30,7 +30,7 @@ if _env.exists():
 # ── Config — edit these if needed ─────────────────────────────────────────────
 COURSE_DIR   = "data_structures"
 SUMMARY_FILE = _ROOT / "summaries" / COURSE_DIR / "20260409_201529_de52e190c78340c5dc55d485c745f3243523d68c.txt"
-MODEL        = os.getenv("KB_MODEL", "gemini-2.5-flash")
+MODEL        = os.getenv("KB_MODEL", "gemini-3.6-flash")
 API_KEY      = os.getenv("GOOGLE_API_KEY", "")
 
 # ── Run ────────────────────────────────────────────────────────────────────────
