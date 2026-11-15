@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lecture Summarizer: long lecture recordings into Hebrew study material</title>
+<meta name="description" content="A full-stack web app by Roy Yanko, a Ben-Gurion University student: it transcribes lecture recordings, reads the board, and writes structured Hebrew summaries with rendered math and an AI tutor.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lecture Summarizer">
+<meta property="og:title" content="Lecture Summarizer: lecture recordings into Hebrew study material">
+<meta property="og:description" content="Transcription that reads the board, colour-coded Hebrew summaries with rendered math, and an AI tutor. A full-stack project by Roy Yanko, BGU student.">
+<meta property="og:url" content="__SITE__/">
+<meta property="og:image" content="__SITE__/assets/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Lecture Summarizer: lecture recordings into Hebrew study material">
+<meta name="twitter:description" content="Transcription that reads the board, colour-coded Hebrew summaries with rendered math, and an AI tutor.">
+<meta name="twitter:image" content="__SITE__/assets/og.png">
+<meta name="theme-color" content="#00205B">
+<link rel="icon" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --navy:#00205B; --navy-deep:#001540; --navy-ink:#000d2b; --orange:#FF7A00; --orange-soft:#FF9A33;
+  --paper:#F6F3EC; --card:#fff; --ink:#0c1633; --muted:#55607a; --line:#dcd6c8;
+  --def:#2563eb; --def-bg:#dbeafe; --thm:#d97706; --thm-bg:#fef3c7; --clm:#0d9488; --clm-bg:#ccfbf1;
+  --prf:#16a34a; --prf-bg:#bbf7d0; --exr:#dc2626; --exr-bg:#fecaca; --nte:#7c3aed; --nte-bg:#ddd6fe;
+  --display:'Syne',system-ui,sans-serif; --body:'Figtree',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.6 var(--body);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+img,video{max-width:100%;display:block}
+a{color:inherit}
+.wrap{width:min(1120px,100% - 32px);margin-inline:auto}
+h1,h2,h3{font-family:var(--display);line-height:1.08;margin:0;letter-spacing:-.01em}
+p{margin:0 0 1em}
+.eyebrow{font:700 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--orange)}
+
+/* ── hero ── */
+.hero{background:var(--navy);color:#fff;position:relative;overflow:hidden;padding:28px 0 0}
+.hero::before{content:"";position:absolute;inset:0;background:
+  radial-gradient(900px 500px at 85% -10%,rgba(255,122,0,.28),transparent 60%),
+  radial-gradient(700px 500px at -10% 110%,rgba(37,99,235,.35),transparent 60%),
+  linear-gradient(rgba(255,255,255,.045) 1px,transparent 1px) 0 0/100% 44px,
+  linear-gradient(90deg,rgba(255,255,255,.045) 1px,transparent 1px) 0 0/44px 100%;pointer-events:none}
+.hero .wrap{position:relative}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;font:700 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.75)}
+.topbar b{color:var(--orange)}
+.topbar nav{display:flex;gap:22px}
+.topbar a{text-decoration:none}
+.topbar a:hover{color:#fff}
+.hero-grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:48px;align-items:center;padding:64px 0 0}
+.hero h1{font-size:clamp(2rem,4vw,3.25rem);font-weight:800;color:var(--orange);text-wrap:balance}
+.hero h1 span{color:#fff;display:block}
+.lede{font-size:clamp(1.05rem,1.6vw,1.28rem);color:rgba(255,255,255,.88);margin:22px 0 26px;max-width:34em}
+.tags{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:30px}
+.tags i{font:700 12px/1 var(--mono);font-style:normal;padding:8px 11px;border-radius:6px;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.18)}
+.cta{display:flex;flex-wrap:wrap;gap:12px}
+.btn{display:inline-flex;align-items:center;gap:8px;font:700 15px/1 var(--display);text-decoration:none;padding:15px 22px;border-radius:12px;border:2px solid var(--orange);transition:transform .15s,background .15s}
+.btn.solid{background:var(--orange);color:#1a0d00}
+.btn:hover{transform:translateY(-2px)}
+.btn.ghost:hover{background:rgba(255,122,0,.15)}
+.player{position:relative;border-radius:16px 16px 0 0;overflow:hidden;border:2px solid rgba(255,255,255,.2);border-bottom:0;box-shadow:0 30px 80px rgba(0,0,0,.5);background:#000;transform:translateY(6px)}
+.player video{width:100%;aspect-ratio:16/9;background:#001540}
+.chrome{display:flex;gap:6px;padding:10px 12px;background:#0a1a44}
+.chrome s{width:10px;height:10px;border-radius:50%;background:rgba(255,255,255,.25)}
+.chrome em{margin-left:auto;font:500 11px/1 var(--mono);font-style:normal;color:rgba(255,255,255,.55)}
+.vnote{font:500 12px/1.4 var(--mono);color:rgba(255,255,255,.6);margin:0 0 10px}
+.strip{display:flex;height:8px}
+.strip b{flex:1}
+
+/* ── sections ── */
+section{padding:84px 0}
+.head{display:grid;gap:14px;margin-bottom:40px;max-width:46em}
+.head h2{font-size:clamp(1.9rem,4vw,3rem);font-weight:800;color:var(--navy);text-wrap:balance}
+.head p{color:var(--muted);margin:0;font-size:1.08rem}
+.dark{background:var(--navy-deep);color:#fff}
+.dark .head h2{color:#fff}.dark .head p{color:rgba(255,255,255,.72)}
+
+/* problem */
+.problem{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.pcard{background:var(--card);border:2px solid var(--line);border-radius:16px;padding:26px}
+.pcard h3{font-size:1.15rem;margin-bottom:10px;color:var(--navy)}
+.pcard.after{border-color:var(--orange);box-shadow:8px 8px 0 var(--navy)}
+.pcard ul{margin:0;padding-left:1.1em;color:var(--muted)}
+.pcard li{margin:.35em 0}
+
+/* numbers */
+.nums{display:grid;grid-template-columns:repeat(5,1fr);gap:0;border:2px solid rgba(255,255,255,.16);border-radius:16px;overflow:hidden}
+.num{padding:26px 20px;border-right:1px solid rgba(255,255,255,.14)}
+.num:last-child{border-right:0}
+.num b{display:block;white-space:nowrap;font:800 clamp(1.7rem,3.3vw,2.5rem)/1 var(--display);color:var(--orange)}
+.num span{display:block;margin-top:10px;font-size:.93rem;color:rgba(255,255,255,.78);line-height:1.35}
+.fine{font:500 12.5px/1.5 var(--mono);color:rgba(255,255,255,.5);margin-top:18px}
+
+/* features = semantic cards */
+.feats{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.sc{background:var(--bg);border:2px solid var(--c);border-left-width:7px;border-radius:12px;padding:20px 20px 18px;position:relative}
+.sc small{font:700 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--c)}
+.sc h3{font-size:1.14rem;margin:10px 0 8px;color:var(--ink)}
+.sc p{margin:0;font-size:.97rem;color:#27304d}
+.sc.def{--c:var(--def);--bg:var(--def-bg)}.sc.thm{--c:var(--thm);--bg:var(--thm-bg)}.sc.clm{--c:var(--clm);--bg:var(--clm-bg)}
+.sc.prf{--c:var(--prf);--bg:var(--prf-bg)}.sc.exr{--c:var(--exr);--bg:var(--exr-bg)}.sc.nte{--c:var(--nte);--bg:var(--nte-bg)}
+.sc.wide{grid-column:span 3;display:grid;grid-template-columns:auto 1fr;gap:6px 22px;align-items:center;--c:var(--navy);--bg:#fff}
+.sc.wide h3{margin:0}.sc.wide small{grid-column:1/-1}
+
+/* screenshots */
+.shots{display:grid;grid-template-columns:repeat(2,1fr);gap:26px}
+figure{margin:0}
+.shot{border-radius:14px;overflow:hidden;border:2px solid var(--navy);background:var(--navy);box-shadow:6px 6px 0 var(--orange);cursor:zoom-in;padding:0;display:block;width:100%}
+.shot img{width:100%;height:auto;aspect-ratio:16/10;object-fit:cover;object-position:top}
+figcaption{margin-top:14px;font-size:.98rem;color:var(--muted)}
+figcaption b{color:var(--ink);font-family:var(--display)}
+.shots .big{grid-column:span 2}
+.shots .big img{aspect-ratio:16/10}
+dialog{border:0;padding:0;background:transparent;max-width:96vw;max-height:94vh}
+dialog::backdrop{background:rgba(0,10,35,.88)}
+dialog img{max-width:96vw;max-height:94vh;border-radius:10px}
+
+/* architecture */
+.arch{display:grid;grid-template-columns:1fr auto 1.15fr auto 1.15fr;gap:14px;align-items:center}
+.node{border:2px solid rgba(255,255,255,.22);border-radius:14px;padding:18px;background:rgba(255,255,255,.05)}
+.node h3{font-size:1.05rem;color:#fff}
+.node small{display:block;font:700 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--orange);margin-bottom:8px}
+.node p{margin:8px 0 0;font-size:.9rem;color:rgba(255,255,255,.72);line-height:1.45}
+.node.core{border-color:var(--orange);background:rgba(255,122,0,.1)}
+.stack{display:grid;gap:12px}
+.arrow{font:700 22px/1 var(--mono);color:var(--orange);text-align:center}
+.steps{list-style:none;margin:48px 0 0;padding:0;display:grid;grid-template-columns:repeat(4,1fr);gap:14px;counter-reset:s}
+.steps li{counter-increment:s;border-top:3px solid var(--orange);padding:14px 4px 0;font-size:.95rem;color:rgba(255,255,255,.8);line-height:1.45}
+.steps li::before{content:counter(s,decimal-leading-zero);display:block;font:700 13px/1 var(--mono);color:var(--orange);margin-bottom:8px}
+.steps b{color:#fff;display:block;font-family:var(--display);margin-bottom:4px}
+
+/* challenges */
+.chal{display:grid;gap:16px}
+.ch{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);border-radius:14px;overflow:hidden;border:2px solid var(--line);background:#fff}
+.ch>div{padding:22px 24px}
+.ch .p{background:#fff5f3;border-right:2px dashed var(--line)}
+.ch small{font:700 11px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase}
+.ch .p small{color:var(--exr)}.ch .s small{color:var(--prf)}
+.ch h3{font-size:1.12rem;margin:9px 0 6px;color:var(--navy)}
+.ch p{margin:0;font-size:.97rem;color:#333c57}
+code{font:500 .88em var(--mono);background:rgba(0,32,91,.08);padding:1px 5px;border-radius:4px}
+
+/* stack */
+.tech{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+.tcol{background:#fff;border:2px solid var(--line);border-radius:14px;padding:20px}
+.tcol h3{font:700 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--orange);margin-bottom:14px}
+.tcol ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.tcol li{font-weight:600;padding:9px 12px;border-radius:8px;background:var(--paper);border-left:4px solid var(--navy);font-size:.95rem}
+.tcol li span{display:block;font-weight:400;font-size:.82rem;color:var(--muted)}
+
+/* learned */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+.list{background:#fff;border:2px solid var(--line);border-radius:16px;padding:26px}
+.list h3{font-size:1.3rem;color:var(--navy);margin-bottom:14px}
+.list ol,.list ul{margin:0;padding-left:1.2em}
+.list li{margin:.6em 0}
+.list li b{color:var(--navy)}
+.ai{margin-top:28px;background:var(--navy);color:#fff;border-radius:16px;padding:28px;display:grid;grid-template-columns:auto 1fr;gap:10px 26px;align-items:start;box-shadow:8px 8px 0 var(--orange)}
+.ai h3{font-size:1.3rem;color:var(--orange);grid-column:1/-1}
+.ai p{margin:0;color:rgba(255,255,255,.86);grid-column:1/-1;max-width:60em}
+
+footer{background:var(--navy-ink);color:rgba(255,255,255,.8);padding:54px 0 40px}
+.foot{display:flex;flex-wrap:wrap;gap:24px;justify-content:space-between;align-items:end}
+.foot h2{font-size:1.7rem;color:#fff;margin-bottom:6px}
+.links{display:flex;flex-wrap:wrap;gap:10px}
+.links a{font:700 13px/1 var(--mono);text-decoration:none;padding:12px 14px;border:1px solid rgba(255,255,255,.25);border-radius:8px}
+.links a:hover{border-color:var(--orange);color:var(--orange)}
+.copy{margin-top:30px;font:500 12px/1.5 var(--mono);color:rgba(255,255,255,.45)}
+
+.rv{opacity:0;transform:translateY(18px);transition:opacity .6s,transform .6s}
+.rv.in{opacity:1;transform:none}
+@media (prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}html{scroll-behavior:auto}}
+
+@media (max-width:900px){
+  .hero-grid{grid-template-columns:1fr;gap:34px;padding-top:44px}
+  .topbar nav{display:none}
+  .problem,.two,.shots{grid-template-columns:1fr}
+  .shots .big{grid-column:auto}
+  .feats{grid-template-columns:1fr 1fr}.sc.wide{grid-column:span 2}
+  .nums{grid-template-columns:1fr 1fr}.num{border-bottom:1px solid rgba(255,255,255,.14)}.num:nth-child(2n){border-right:0}.num:last-child{grid-column:span 2;border-bottom:0}
+  .arch{grid-template-columns:1fr}.arrow{transform:rotate(90deg)}
+  .steps{grid-template-columns:1fr 1fr}
+  .ch{grid-template-columns:1fr}.ch .p{border-right:0;border-bottom:2px dashed var(--line)}
+  .tech{grid-template-columns:1fr 1fr}
+  section{padding:60px 0}
+}
+@media (max-width:560px){
+  body{font-size:16px}
+  .feats,.tech,.steps{grid-template-columns:1fr}.sc.wide{grid-column:auto;grid-template-columns:1fr}
+  .btn{flex:1;justify-content:center}
+  .pcard.after,.ai{box-shadow:5px 5px 0 var(--navy)}.ai{box-shadow:5px 5px 0 var(--orange)}
+}
+
+/* v2 */
+.mini{display:flex;flex-wrap:wrap;gap:10px 34px;margin-top:26px;padding-top:22px;border-top:2px solid var(--line);font-size:.98rem;color:var(--muted)}
+.mini b{font:800 1.25rem/1 var(--display);color:var(--navy);margin-right:6px}
+.sc p{font-size:.93rem}
+.codegrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px}
+.panel{background:#fff;border:2px solid var(--line);border-radius:14px;padding:22px;min-width:0}
+.panel h3{font-size:1.12rem;color:var(--navy);margin-bottom:10px}
+.panel p{font-size:.96rem;color:#333c57;margin:0 0 .8em}
+pre{margin:0;background:#07122f;color:#dbe4ff;border-radius:10px;padding:16px;overflow-x:auto;font:500 12.5px/1.6 var(--mono);border-left:4px solid var(--orange)}
+pre .c{color:#7f8db3}pre .k{color:#ff9a33}pre .s{color:#8fe3b0}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+td:first-child{font:700 11px/1.7 var(--mono);color:var(--orange);white-space:nowrap}
+td:nth-child(2){font:500 12.5px/1.6 var(--mono);color:var(--navy);word-break:break-word}
+.dec{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:22px}
+.dec div{border:2px solid rgba(255,255,255,.18);border-radius:12px;padding:16px;background:rgba(255,255,255,.04)}
+.dec b{display:block;font-family:var(--display);color:#fff;margin-bottom:6px}
+.dec span{font-size:.92rem;color:rgba(255,255,255,.75);line-height:1.45;display:block}
+.flow{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px;font:700 12.5px/1 var(--mono)}
+.flow i{font-style:normal;padding:10px 12px;border-radius:8px;background:rgba(255,122,0,.14);border:1px solid var(--orange);color:#fff}
+.flow em{font-style:normal;color:var(--orange);align-self:center}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chips i{font:700 13px/1 var(--mono);font-style:normal;padding:10px 12px;border-radius:8px;background:#fff;border:2px solid var(--line);border-left:5px solid var(--navy)}
+.learned{grid-column:1/-1;margin:6px 0 0;padding:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:10px 28px}
+.learned li{color:rgba(255,255,255,.82);font-size:.97rem;padding-left:16px;border-left:3px solid var(--orange);line-height:1.45}
+.learned b{color:#fff}
+@media (max-width:700px){.learned{grid-template-columns:1fr}}
+.learn{display:flex;flex-wrap:wrap;gap:8px;grid-column:1/-1;margin-top:8px}
+.learn i{font:600 .9rem/1 var(--body);font-style:normal;padding:9px 12px;border-radius:999px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25)}
+@media (max-width:900px){.codegrid{grid-template-columns:1fr}.dec{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="topbar">
+      <span><b>●</b> Student project · 2026</span>
+      <nav><a href="#arch">Architecture</a><a href="#code">Inside the code</a><a href="#challenges">Challenges</a><a href="#ai">Built with AI</a></nav>
+    </div>
+    <div class="hero-grid">
+      <div>
+        <h1>Lecture <span>Summarizer</span></h1>
+        <p class="lede">A full-stack web app that turns a two-hour university lecture recording into organized Hebrew study notes: a transcript that includes the board, colour-coded summary cards with rendered math, and an AI tutor.</p>
+        <div class="tags"><i>Next.js 15</i><i>FastAPI</i><i>Gemini API</i><i>ffmpeg</i><i>Hebrew RTL + LaTeX</i></div>
+        <div class="cta">
+          <a class="btn solid" href="#demo">▶ Watch the demo (43s)</a>
+          <a class="btn ghost" href="#arch">See the architecture</a>
+          <a class="btn ghost" href="https://github.com/Royanko/lecture-summarizer">Code on GitHub</a>
+        </div>
+      </div>
+      <div id="demo">
+        <p class="vnote">Real app, recorded locally. Processing is replayed from a saved run and sped up.</p>
+        <div class="player">
+          <div class="chrome"><s></s><s></s><s></s><em>lecture-summarizer · demo</em></div>
+          <video controls playsinline muted preload="none" poster="assets/poster.jpg">
+            <source src="assets/demo.mp4" type="video/mp4">
+          </video>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="strip" aria-hidden="true"><b style="background:var(--def)"></b><b style="background:var(--thm)"></b><b style="background:var(--clm)"></b><b style="background:var(--prf)"></b><b style="background:var(--exr)"></b><b style="background:var(--nte)"></b></div>
+</header>
+
+<main>
+<section id="why" style="padding-bottom:56px">
+  <div class="wrap">
+    <div class="head rv">
+      <span class="eyebrow">Why I built it</span>
+      <h2>A recording is not study material.</h2>
+      <p>I study at Ben-Gurion University. My math courses are recorded, but a two-hour video is slow to search, and ordinary transcription misses the Hebrew and the formulas on the board. So I built a tool that handles both, and used it all semester.</p>
+    </div>
+    <div class="feats">
+      <div class="sc def rv"><small>Transcription</small><h3>Reads the board</h3><p>Audio plus one video frame per minute, so written formulas reach the transcript.</p></div>
+      <div class="sc thm rv"><small>Summaries</small><h3>Colour-coded Hebrew cards</h3><p>Definitions, theorems, proofs and exercises, each as its own card.</p></div>
+      <div class="sc clm rv"><small>Math</small><h3>Rendered formulas</h3><p>LaTeX math inside right-to-left Hebrew text.</p></div>
+      <div class="sc prf rv"><small>Master summary</small><h3>One document per lecture</h3><p>Segment summaries are combined at the end.</p></div>
+      <div class="sc exr rv"><small>AI tutor</small><h3>Ask about the lecture</h3><p>A Hebrew chat that uses the lecture as context.</p></div>
+      <div class="sc nte rv"><small>Reliability</small><h3>Jobs resume</h3><p>An interrupted job continues from its last finished segment.</p></div>
+    </div>
+    <div class="mini rv"><span><b>18</b>full lectures processed</span><span><b>30 h</b>of recordings, approximately</span><span><b>4</b>courses</span><span><b>1,010</b>summary cards</span></div>
+  </div>
+</section>
+
+<section id="arch" class="dark">
+  <div class="wrap">
+    <div class="head rv">
+      <span class="eyebrow">Architecture</span>
+      <h2>Two servers, one pipeline, plain files.</h2>
+      <p>The interface and the processing are separate programs that talk over a small REST API. A lecture runs as a background job, so the interface stays responsive during an hour of work.</p>
+    </div>
+    <div class="arch rv">
+      <div class="node"><small>Frontend · port 3000</small><h3>Next.js 15 + React</h3><p>TypeScript. Upload, live progress, card renderer, KaTeX math, tutor chat. State is kept in the browser session, so a refresh resumes polling.</p></div>
+      <div class="arrow" aria-hidden="true">⇄</div>
+      <div class="node core"><small>Backend · port 8000</small><h3>FastAPI (Python)</h3><p>14 REST endpoints. Each lecture is a background job with a job ID. Owns timeouts, retries, checkpoints and file output.</p></div>
+      <div class="arrow" aria-hidden="true">⇄</div>
+      <div class="stack">
+        <div class="node"><small>Media tool</small><h3>ffmpeg</h3><p>Splits recordings into segments, extracts one frame per minute.</p></div>
+        <div class="node"><small>AI model</small><h3>Google Gemini API</h3><p>One client for transcription, summaries and chat. Large media goes through the Files API.</p></div>
+        <div class="node"><small>Storage</small><h3>Local files</h3><p>Summaries and transcripts per course, plus a checkpoint folder per unfinished job.</p></div>
+      </div>
+    </div>
+    <div class="flow rv" aria-label="Pipeline"><i>upload</i><em>→</em><i>split (ffmpeg)</i><em>→</em><i>transcribe + frames</i><em>→</em><i>checkpoint</i><em>→</em><i>summarise</i><em>→</em><i>repair tags + LaTeX</i><em>→</em><i>master summary</i><em>→</em><i>save</i></div>
+    <div class="dec rv">
+      <div><b>Polling, not a live socket</b><span>The browser asks for job status every 2.5 seconds. It is simpler than WebSockets and survives a page refresh or a dropped connection.</span></div>
+      <div><b>Progressive results</b><span>The job publishes each segment as it finishes. The summary page opens after the first one, long before the lecture is done.</span></div>
+      <div><b>Stateless chat</b><span>Every tutor request carries the summary and the chat history. The server rebuilds the conversation each time and stores nothing.</span></div>
+      <div><b>Uploads bypass the proxy</b><span>Small JSON calls go through the Next.js proxy. Video files go straight to FastAPI, because the proxy cuts requests off at 10 MB.</span></div>
+      <div><b>Prompts live in files</b><span>Each AI task has its own prompt file. Changing the summary format means editing text, not code.</span></div>
+      <div><b>Files before a database</b><span>One user and text output: folders per course are easy to inspect and back up. A database is the next step if there are more users.</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="code">
+  <div class="wrap">
+    <div class="head rv">
+      <span class="eyebrow">Inside the code</span>
+      <h2>About 2,100 lines of Python and 3,100 of TypeScript.</h2>
+      <p>The layout, the API, and two short excerpts from the real project. The full source is in the <a href="https://github.com/Royanko/lecture-summarizer">GitHub repository</a>.</p>
+    </div>
+    <div class="codegrid">
+      <div class="panel rv"><h3>Project layout</h3>
+<pre>backend/
+  main.py            <span class="c"># FastAPI app + pipeline</span>
+frontend/
+  app/page.tsx       <span class="c"># dashboard, upload, resume</span>
+  app/summary/       <span class="c"># cards + tutor chat</span>
+  components/
+    SummaryRenderer  <span class="c"># tags → cards, LaTeX</span>
+  lib/api.ts         <span class="c"># API client, polling</span>
+  lib/AppContext     <span class="c"># session state</span>
+skills/              <span class="c"># one prompt file per AI task</span>
+summaries/&lt;course&gt;/  <span class="c"># saved output</span>
+transcriptions/&lt;course&gt;/_wip_*/  <span class="c"># checkpoints</span></pre></div>
+      <div class="panel rv"><h3>The API</h3>
+        <table>
+          <tr><td>POST</td><td>/upload</td><td>start a job, return its ID</td></tr>
+          <tr><td>POST</td><td>/upload-transcript</td><td>skip transcription</td></tr>
+          <tr><td>POST</td><td>/resume</td><td>continue from checkpoints</td></tr>
+          <tr><td>GET</td><td>/jobs/{id}</td><td>status + finished segments</td></tr>
+          <tr><td>POST</td><td>/chat</td><td>tutor reply</td></tr>
+          <tr><td>GET</td><td>/resumable-jobs/{course}</td><td>interrupted jobs</td></tr>
+          <tr><td>GET</td><td>/summaries/{course}</td><td>saved lectures</td></tr>
+        </table>
+      </div>
+      <div class="panel rv"><h3>A hard timeout around every AI call</h3><p>The AI library sets no default timeout, so one stuck request could freeze a job forever. Every call runs in a thread pool with a deadline.</p>
+<pre><span class="k">def</span> _timed(label, fn, *args, timeout, **kwargs):
+    future = _gemini_pool.submit(fn, *args, **kwargs)
+    <span class="k">try</span>:
+        <span class="k">return</span> future.result(timeout=timeout)
+    <span class="k">except</span> concurrent.futures.TimeoutError:
+        <span class="k">raise</span> TimeoutError(
+            f<span class="s">"'{label}' timed out after {timeout}s"</span>)</pre></div>
+      <div class="panel rv"><h3>Polling that stops itself</h3><p>The frontend checks the job on a timer, ignores a failed check, and stops when the job reaches a final state.</p>
+<pre><span class="k">async function</span> tick() {
+  <span class="k">if</span> (!running) <span class="k">return</span>;
+  <span class="k">try</span> {
+    <span class="k">const</span> res = <span class="k">await</span> fetch(proxyUrl(<span class="s">`/jobs/${jobId}`</span>));
+    <span class="k">if</span> (res.ok) {
+      <span class="k">const</span> job = <span class="k">await</span> res.json();
+      onUpdate(job);
+      <span class="k">if</span> (job.status === <span class="s">"done"</span> ||
+          job.status === <span class="s">"error"</span>) <span class="k">return</span>;
+    }
+  } <span class="k">catch</span> { <span class="c">/* transient error: retry */</span> }
+  setTimeout(tick, intervalMs);
+}</pre></div>
+    </div>
+  </div>
+</section>
+
+<section id="shots" style="padding-top:0">
+  <div class="wrap">
+    <div class="head rv">
+      <span class="eyebrow">Screenshots</span>
+      <h2>The real app.</h2>
+      <p>Captured on my computer with a real combinatorics lecture. Tap an image to enlarge it.</p>
+    </div>
+    <div class="shots">
+      <figure class="big rv"><button class="shot"><img src="assets/cards.jpg" alt="Summary page with a teal claim card containing Hebrew text and rendered formulas, next to the tutor chat panel" width="1600" height="1000"></button><figcaption><b>Summary cards.</b> A claim from a lecture on the inclusion–exclusion principle, with rendered math.</figcaption></figure>
+      <figure class="rv"><button class="shot"><img src="assets/dashboard.jpg" alt="Dashboard with upload area, model settings and four course cards" width="1600" height="1000"></button><figcaption><b>Dashboard.</b> Choose a course and upload a recording.</figcaption></figure>
+      <figure class="rv"><button class="shot"><img src="assets/transcript.jpg" alt="Transcript view with timestamps and highlighted board content" width="1600" height="1000"></button><figcaption><b>Transcript.</b> The highlighted boxes are formulas read from the board.</figcaption></figure>
+      <figure class="rv"><button class="shot"><img src="assets/tutor.jpg" alt="Tutor chat answering a question with a worked example" width="1600" height="1000"></button><figcaption><b>AI tutor.</b> A worked example in answer to a question.</figcaption></figure>
+      <figure class="rv"><button class="shot"><img src="assets/resume.jpg" alt="Interrupted Jobs panel showing 6 of 9 segments completed with Resume and Terminate buttons" width="1600" height="1000"></button><figcaption><b>Resume.</b> A job that stopped after 6 of 9 segments.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="challenges" style="padding-top:0">
+  <div class="wrap">
+    <div class="head rv">
+      <span class="eyebrow">Engineering challenges</span>
+      <h2>What broke, and how I fixed it.</h2>
+    </div>
+    <div class="chal">
+      <div class="ch rv"><div class="p"><small>Problem</small><h3>Jobs died halfway</h3><p>One network error near the end of a two-hour lecture meant starting from zero.</p></div><div class="s"><small>Solution</small><h3>Checkpoints and resume</h3><p>Each segment is written to disk when it finishes. A resumed job loads those files and continues with the next segment.</p></div></div>
+      <div class="ch rv"><div class="p"><small>Problem</small><h3>Rate limits and calls that hung</h3><p>The AI service rejected requests over quota, and some calls never returned at all.</p></div><div class="s"><small>Solution</small><h3>Timeouts and exponential backoff</h3><p>Every call has a deadline. Quota errors wait 2 minutes, then 4, 8, up to 30, or the delay the server asks for.</p></div></div>
+      <div class="ch rv"><div class="p"><small>Problem</small><h3>Hebrew and math fought each other</h3><p>Right-to-left text mixed with LaTeX produced broken formulas and stray grey code blocks.</p></div><div class="s"><small>Solution</small><h3>Fix the prompt, normalise in code</h3><p>A stricter prompt, a normalising step for what slips through, and one fewer AI call per segment.</p></div></div>
+      <div class="ch rv"><div class="p"><small>Problem</small><h3>Recordings too big to upload</h3><p>Videos are hundreds of megabytes; the frontend proxy stops at 10 MB.</p></div><div class="s"><small>Solution</small><h3>Direct upload, then split</h3><p>The browser sends the file straight to the backend, and ffmpeg cuts it into segments the AI service accepts.</p></div></div>
+      <div class="ch rv"><div class="p"><small>Problem</small><h3>The AI provider changed twice</h3><p>I moved to Google's Vertex AI, later closed that account, and my model versions were retired.</p></div><div class="s"><small>Solution</small><h3>One swappable AI client</h3><p>All AI calls go through a single client, so switching provider changed the connection code, not the pipeline.</p></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="stack" style="padding-top:0">
+  <div class="wrap">
+    <div class="head rv"><span class="eyebrow">Tech stack</span><h2>What it is made of.</h2></div>
+    <div class="chips rv"><i>Next.js 15</i><i>React</i><i>TypeScript</i><i>Tailwind CSS</i><i>KaTeX</i><i>Python</i><i>FastAPI</i><i>Uvicorn</i><i>Google Gemini API</i><i>ffmpeg</i><i>Git + GitHub</i><i>Claude Code</i></div>
+  </div>
+</section>
+
+<section id="ai" style="padding-top:0">
+  <div class="wrap">
+    <div class="ai rv">
+      <h3>Built with an AI coding assistant, and what it taught me</h3>
+      <p>I built this project with Claude Code. I defined what the product should do, chose between the options at each step, tested every change on my own lectures, and decided what to keep. The assistant wrote most of the code under that direction.</p>
+      <p style="margin-top:14px"><b style="color:#fff">Building it taught me a lot:</b></p>
+      <ul class="learned">
+        <li><b>Coding.</b> Reading code, following its logic and finding where a bug comes from.</li>
+        <li><b>Working with AI models.</b> What they do well, where they fail, and how to check their output.</li>
+        <li><b>Web servers and APIs.</b> How a request travels from the browser to a server and back.</li>
+        <li><b>How the frontend works.</b> Pages, components, state and styling.</li>
+        <li><b>How the backend works.</b> Endpoints, background jobs and saving files.</li>
+        <li><b>Styling.</b> Layout, colour and right-to-left text.</li>
+        <li><b>Git and GitHub.</b> Commits, branches and keeping secrets out of the repository.</li>
+        <li><b>Writing better prompts.</b> Precise requirements give better results.</li>
+        <li><b>Adjusting my workflow.</b> Small steps, with a check after each one.</li>
+        <li><b>Tokens.</b> How usage is counted, and how to spend it carefully.</li>
+        <li><b>Skills, connectors and plugins.</b> Extending the assistant with reusable instructions and outside tools.</li>
+      </ul>
+    </div>
+    <div class="two" style="margin-top:34px">
+      <div class="list rv">
+        <h3>What I took from it</h3>
+        <ol>
+          <li><b>Plan for failure first.</b> Timeouts, retries and checkpoints mattered more than any feature.</li>
+          <li><b>AI output is input.</b> It has to be checked and repaired like any outside data.</li>
+          <li><b>Test on the real thing.</b> A short clip hid what a two-hour lecture exposed.</li>
+        </ol>
+      </div>
+      <div class="list rv">
+        <h3>What I would improve next</h3>
+        <ul>
+          <li><b>Automated tests</b> in place of manual end-to-end checks.</li>
+          <li><b>Hosting and accounts,</b> so classmates could use it.</li>
+          <li><b>A database</b> once there is more than one user.</li>
+          <li><b>Parallel segments</b> within the rate limits.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div><h2>Roy Yanko</h2><div>Student, Ben-Gurion University of the Negev</div></div>
+      <div class="links">
+        <a href="https://github.com/Royanko/lecture-summarizer">GitHub repository</a>
+        <a href="https://www.linkedin.com/in/roy-yanko">LinkedIn</a>
+        <a href="mailto:royanko66@gmail.com">Email</a>
+      </div>
+    </div>
+    <p class="copy">Lecture Summarizer is a personal study tool. Screenshots show short excerpts of my own study notes.</p>
+  </div>
+</footer>
+
+<dialog id="lb"><img alt=""></dialog>
+<script>
+const io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{rootMargin:'0px 0px -8% 0px'});
+document.querySelectorAll('.rv').forEach(el=>io.observe(el));
+const lb=document.getElementById('lb'),li=lb.querySelector('img');
+document.querySelectorAll('.shot').forEach(b=>b.addEventListener('click',()=>{const i=b.querySelector('img');li.src=i.src;li.alt=i.alt;lb.showModal()}));
+lb.addEventListener('click',()=>lb.close());
+document.querySelector('.btn.solid').addEventListener('click',()=>{const v=document.querySelector('video');setTimeout(()=>v.play().catch(()=>{}),350)});
+</script>
+</body>
+</html>
