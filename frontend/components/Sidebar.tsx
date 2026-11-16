@@ -28,7 +28,7 @@ export default function Sidebar() {
       {/* Header */}
       <div className="px-6 pt-8 pb-6 border-b border-bgu-blue-light">
         <p className="text-bgu-orange text-xs font-display font-bold tracking-widest uppercase mb-1">
-          BGU Lecture Summarizer
+          Lecture Summarizer
         </p>
         <h2 className="font-display font-bold text-xl text-white leading-tight">
           Operation Settings
@@ -118,7 +118,7 @@ export default function Sidebar() {
           </ol>
         </div>
         <p className="mt-4 text-[0.7rem] text-slate-500">
-          BGU Lecture Summarizer · Powered by Gemini
+          Lecture Summarizer · Powered by Gemini
         </p>
       </div>
     </aside>

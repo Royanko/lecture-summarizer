@@ -1,5 +1,5 @@
 """
-BGU Lecture Summarizer — FastAPI Backend
+Lecture Summarizer — FastAPI Backend
 
 Run:
     cd backend
@@ -72,7 +72,7 @@ from google import genai
 from google.genai import types
 
 # ── App ────────────────────────────────────────────────────────────────────────
-app = FastAPI(title="BGU Lecture Summarizer API", version="2.0.0")
+app = FastAPI(title="Lecture Summarizer API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,

@@ -1,4 +1,4 @@
-# BGU Lecture Summarizer v2.0
+# Lecture Summarizer v2.0
 
 An AI-powered academic tool that transcribes university lecture recordings, generates structured Hebrew summaries with styled semantic cards, and builds a continuously-updating **Knowledge Base** for each course — all powered by Google Gemini.
 

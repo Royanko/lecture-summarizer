@@ -409,7 +409,7 @@ function DashboardInner() {
             className="font-display font-extrabold text-5xl leading-tight"
             style={{ color: "#FF7A00" }}
           >
-            BGU Lecture Summarizer
+            Lecture Summarizer
           </h1>
           <p className="text-slate-300 text-sm mt-2">
             Upload a lecture → AI transcribes &amp; summarizes → Chat with your tutor

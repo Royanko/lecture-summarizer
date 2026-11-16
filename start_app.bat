@@ -1,10 +1,10 @@
 @echo off
-title BGU Lecture Summarizer
+title Lecture Summarizer
 color 0B
 
 echo.
 echo  ============================================================
-echo   BGU Lecture Summarizer  v2.0  --  Next.js + FastAPI
+echo   Lecture Summarizer  v2.0  --  Next.js + FastAPI
 echo  ============================================================
 echo.
 

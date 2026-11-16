@@ -7,8 +7,8 @@ $BatPath      = Join-Path $ProjectDir "start_app.bat"
 $IconFile     = Join-Path $ProjectDir "assets\bgu_ai.ico"
 $Desktop      = [Environment]::GetFolderPath("Desktop")
 
-$OldShortcut  = Join-Path $Desktop "BGU Lecture Summarizer.lnk"
-$NewShortcut  = Join-Path $Desktop "BGU Lecture Summarizer.lnk"
+$OldShortcut  = Join-Path $Desktop "Lecture Summarizer.lnk"
+$NewShortcut  = Join-Path $Desktop "Lecture Summarizer.lnk"
 
 # ── 1. Delete old shortcut if it points to the legacy batch file ───────────────
 if (Test-Path $OldShortcut) {
@@ -32,7 +32,7 @@ $sc       = $shell2.CreateShortcut($NewShortcut)
 $sc.TargetPath       = $BatPath
 $sc.WorkingDirectory = $ProjectDir
 $sc.IconLocation     = "$IconFile,0"
-$sc.Description      = "BGU Lecture Summarizer v2.0 -- Next.js + FastAPI + Gemini"
+$sc.Description      = "Lecture Summarizer v2.0 -- Next.js + FastAPI + Gemini"
 $sc.WindowStyle      = 1   # 1 = normal window
 $sc.Save()
 [System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell2) | Out-Null

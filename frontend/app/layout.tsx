@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "BGU Lecture Summarizer",
+  title: "Lecture Summarizer",
   description: "Upload a lecture → AI transcribes, summarises & tutors — Powered by Gemini",
   icons: {
     icon: [
